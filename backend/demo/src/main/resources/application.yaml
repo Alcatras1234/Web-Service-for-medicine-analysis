@@ -35,3 +35,8 @@ server:
 logging:
   level:
     com.e.demo: DEBUG
+
+jwt:
+  secret: "my-super-secret-key-at-least-256-bits-long-for-hs256"
+  expiration-ms: 86400000  # 24 часа
+

@@ -9,7 +9,9 @@ import com.e.demo.server.MinioService;
 import com.e.demo.server.QueuePublisher;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.web.bind.annotation.*;
+import org.springframework.security.core.context.SecurityContextHolder;
 
 import java.util.List;
 import java.util.Map;
@@ -54,7 +56,8 @@ public class FileController {
             String filename   = body.get("filename");
             String patientId  = body.get("patientId");    // ← ДОБАВЛЕНО
             String description = body.get("description"); // ← ДОБАВЛЕНО
-            Integer userId = 1; // TODO: из JWT
+            Integer userId = (Integer)
+            SecurityContextHolder.getContext().getAuthentication().getPrincipal(); // TODO: из JWT
 
             Slide slide = new Slide();
             slide.setUserId(userId);
