@@ -1,9 +1,13 @@
 package com.e.demo.dto;
 
+import java.util.UUID;
+
 public record PatchInferenceEvent(
-    String wsiId,
-    String patchId,
-    String bucket,
-    String patchObjectKey,
-    int x, int y, int w, int h
+        UUID jobId,
+        UUID patchId,
+        String s3Path,
+        int x,
+        int y,
+        int width,
+        int height
 ) {}

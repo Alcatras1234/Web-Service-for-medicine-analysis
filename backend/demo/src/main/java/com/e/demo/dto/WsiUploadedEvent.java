@@ -1,9 +1,8 @@
 package com.e.demo.dto;
 
+import java.util.UUID;
+
 public record WsiUploadedEvent(
-    String wsiId,
-    String bucket,
-    String objectKey,
-    int patchSize,
-    int overlap
+        UUID jobId,
+        String s3Path
 ) {}
