@@ -18,7 +18,7 @@ public interface JobRepository extends JpaRepository<Job, UUID> {
         SET j.patchesTotal = :total,
             j.patchesRemaining = :total,
             j.status = 'PROCESSING',
-            j.updatedAt = now()
+            j.updatedAt = :now
         WHERE j.id = :jobId
     """)
     void updatePatchCount(UUID jobId, int total, Instant now);

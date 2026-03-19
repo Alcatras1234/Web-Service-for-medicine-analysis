@@ -39,7 +39,7 @@ export default function DashboardPage() {
   const fetchSlides = async () => {
     try {
       setIsLoading(true)
-      const res = await fetch("/api/slides")
+      const res = await fetch("/api/files/slides")
       if (!res.ok) throw new Error("Ошибка загрузки")
       const data = await res.json()
       setSlides(data)

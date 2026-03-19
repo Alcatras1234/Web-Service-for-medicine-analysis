@@ -93,7 +93,7 @@ public class TilingWorker {
             }
 
             // Обновляем счётчик патчей в job
-            jobRepository.updatePatchCount(event.jobId(), patches.size());
+            jobRepository.updatePatchCount(event.jobId(), patches.size(), Instant.now());
 
             // Публикуем все патчи в следующую очередь
             patches.forEach(p -> rabbitTemplate.convertAndSend("patches.inference", p));
