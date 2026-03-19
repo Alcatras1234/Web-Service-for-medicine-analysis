@@ -47,39 +47,39 @@ public class FileController {
 
     // Шаг 2: Фронт вызывает после того как залил файл в MinIO
     @PostMapping("/confirm-upload")
-    public ResponseEntity<Map<String, Object>> confirmUpload(
-            @RequestBody Map<String, String> body) {
+        public ResponseEntity<Map<String, Object>> confirmUpload(
+                @RequestBody Map<String, String> body) {
 
-        String objectKey = body.get("objectKey");
-        String filename  = body.get("filename");
+            String objectKey  = body.get("objectKey");
+            String filename   = body.get("filename");
+            String patientId  = body.get("patientId");    // ← ДОБАВЛЕНО
+            String description = body.get("description"); // ← ДОБАВЛЕНО
+            Integer userId = 1; // TODO: из JWT
 
-        // TODO: заменить на userId из JWT когда добавишь Security
-        Integer userId = 1;
+            Slide slide = new Slide();
+            slide.setUserId(userId);
+            slide.setFilename(filename);
+            slide.setS3Path(objectKey);
+            slide.setPatientId(patientId);       // ← ДОБАВЛЕНО
+            slide.setDescription(description);   // ← ДОБАВЛЕНО
+            slide.setStatus("UPLOADED");
+            slideRepository.save(slide);
 
-        // Записываем слайд в БД
-        Slide slide = new Slide();
-        slide.setUserId(userId);
-        slide.setFilename(filename);
-        slide.setS3Path(objectKey);
-        slide.setStatus("UPLOADED");
-        slideRepository.save(slide);
+            Job job = new Job();
+            job.setId(UUID.randomUUID());
+            job.setSlideId(slide.getId());
+            job.setStatus("PENDING");
+            jobRepository.save(job);
 
-        // Создаём job
-        Job job = new Job();
-        job.setId(UUID.randomUUID());
-        job.setSlideId(slide.getId());
-        job.setStatus("PENDING");
-        jobRepository.save(job);
+            publisher.publishWsiUploaded(
+                    new WsiUploadedEvent(job.getId(), objectKey));
 
-        // Публикуем событие → TilingWorker стартует автоматически
-        publisher.publishWsiUploaded(
-                new WsiUploadedEvent(job.getId(), objectKey));
+            return ResponseEntity.accepted().body(Map.of(
+                    "slideId", slide.getId(),
+                    "jobId",   job.getId()
+            ));
+        }
 
-        return ResponseEntity.accepted().body(Map.of(
-                "slideId", slide.getId(),
-                "jobId",   job.getId()
-        ));
-    }
 
     @GetMapping("/slides")
     public ResponseEntity<List<Map<String, Object>>> getSlides() {

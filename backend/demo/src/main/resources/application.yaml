@@ -1,0 +1,37 @@
+spring:
+  application:
+    name: demo
+
+  datasource:
+    url: jdbc:postgresql://backend_db:5432/back_DB
+    username: amogus
+    password: 1234
+    driver-class-name: org.postgresql.Driver
+
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    show-sql: false
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+
+  rabbitmq:
+    host: rabbitmq
+    port: 5672
+    username: guest
+    password: guest
+
+minio:
+  accessKey: minioadmin
+  secretKey: minioadmin
+  bucketName: photos
+  url: http://localhost:9000
+  internalUrl: http://minio:9000
+
+server:
+  port: 8080
+
+logging:
+  level:
+    com.e.demo: DEBUG

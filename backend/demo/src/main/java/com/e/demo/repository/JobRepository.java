@@ -5,6 +5,8 @@ import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.transaction.annotation.Transactional;
+
+import java.time.Instant;
 import java.util.UUID;
 
 public interface JobRepository extends JpaRepository<Job, UUID> {
@@ -19,5 +21,5 @@ public interface JobRepository extends JpaRepository<Job, UUID> {
             j.updatedAt = now()
         WHERE j.id = :jobId
     """)
-    void updatePatchCount(UUID jobId, int total);
+    void updatePatchCount(UUID jobId, int total, Instant now);
 }

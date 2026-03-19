@@ -139,17 +139,16 @@ export default function UploadPage() {
       // чтобы он сохранил запись в БД (ID пациента, имя файла в бакете и т.д.)
       // ------------------------------------------------------------------
       
-      await fetch(`/api/files/complete-upload`, {
+      await fetch(`/api/files/confirm-upload`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           objectKey,
+          filename: file.name,
           patientId,
           description,
-          originalName: file.name,
-          size: file.size
         })
-    });
+      });
 
 
       toast.success("Загрузка завершена", {
