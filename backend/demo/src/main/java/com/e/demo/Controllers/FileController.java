@@ -11,6 +11,7 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
@@ -79,4 +80,20 @@ public class FileController {
                 "jobId",   job.getId()
         ));
     }
+
+    @GetMapping("/slides")
+    public ResponseEntity<List<Map<String, Object>>> getSlides() {
+        return ResponseEntity.ok(
+            slideRepository.findAll().stream().map(s -> {
+                Map<String, Object> m = new java.util.LinkedHashMap<>();
+                m.put("id", s.getId());
+                m.put("filename", s.getFilename());
+                m.put("patientId", s.getPatientId());
+                m.put("description", s.getDescription());
+                m.put("status", s.getStatus());
+                m.put("createdAt", s.getCreatedAt());
+                return m;
+            }).toList()
+        );
+}
 }

@@ -22,6 +22,12 @@ public class Slide {
     @Column(name = "s3_path", nullable = false)
     private String s3Path;
 
+    @Column(name = "patient_id")
+    private String patientId;       // ← ДОБАВЛЕНО
+
+    @Column
+    private String description;     // ← ДОБАВЛЕНО
+
     @Column(nullable = false)
     private String status = "UPLOADED";
 

@@ -20,13 +20,16 @@ CREATE TABLE refresh_tokens (
 
 -- V3__create_slides_and_jobs.sql
 CREATE TABLE slides (
-    id         SERIAL PRIMARY KEY,
-    user_id    INTEGER      NOT NULL REFERENCES users(id),
-    filename   VARCHAR(255) NOT NULL,
-    s3_path    VARCHAR(255) NOT NULL,
-    status     VARCHAR(20)  NOT NULL DEFAULT 'UPLOADED',
-    created_at TIMESTAMP    NOT NULL DEFAULT now()
+    id          SERIAL PRIMARY KEY,
+    user_id     INTEGER      NOT NULL REFERENCES users(id),
+    filename    VARCHAR(255) NOT NULL,
+    s3_path     VARCHAR(255) NOT NULL,
+    patient_id  VARCHAR(100),           -- ← ДОБАВЛЕНО
+    description TEXT,                   -- ← ДОБАВЛЕНО
+    status      VARCHAR(20) NOT NULL DEFAULT 'UPLOADED',
+    created_at  TIMESTAMP NOT NULL DEFAULT now()
 );
+
 
 CREATE TABLE jobs (
     id                UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
