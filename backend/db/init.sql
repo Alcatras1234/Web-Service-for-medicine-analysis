@@ -1,103 +1,67 @@
+-- V1__create_users.sql
 CREATE TABLE users (
-    id SERIAL PRIMARY KEY,
-    email varchar(100) UNIQUE NOT NULL,
-    password varchar(255) NOT NULL
+    id            SERIAL PRIMARY KEY,
+    email         VARCHAR(255) NOT NULL UNIQUE,
+    password_hash VARCHAR(255) NOT NULL,
+    full_name     VARCHAR(100),
+    role          VARCHAR(20)  NOT NULL DEFAULT 'USER',
+    created_at    TIMESTAMP    NOT NULL DEFAULT now()
 );
 
+-- V2__create_refresh_tokens.sql
+CREATE TABLE refresh_tokens (
+    id          BIGSERIAL PRIMARY KEY,
+    user_id     INTEGER      NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    token_hash  VARCHAR(255) NOT NULL,
+    device_info VARCHAR(255),
+    expires_at  TIMESTAMP    NOT NULL,
+    created_at  TIMESTAMP    NOT NULL DEFAULT now()
+);
 
--- CREATE TABLE admin (
---     id SERIAL PRIMARY KEY,
---     login VARCHAR(100) UNIQUE,
---     password VARCHAR(100) UNIQUE
--- );
+-- V3__create_slides_and_jobs.sql
+CREATE TABLE slides (
+    id         SERIAL PRIMARY KEY,
+    user_id    INTEGER      NOT NULL REFERENCES users(id),
+    filename   VARCHAR(255) NOT NULL,
+    s3_path    VARCHAR(255) NOT NULL,
+    status     VARCHAR(20)  NOT NULL DEFAULT 'UPLOADED',
+    created_at TIMESTAMP    NOT NULL DEFAULT now()
+);
 
--- INSERT INTO admin (login, password) VALUES ('root', 'admin');
+CREATE TABLE jobs (
+    id                UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+    slide_id          INTEGER     NOT NULL REFERENCES slides(id),
+    status            VARCHAR(20) NOT NULL DEFAULT 'PENDING',
+    patches_total     INTEGER     NOT NULL DEFAULT 0,
+    patches_remaining INTEGER     NOT NULL DEFAULT 0,
+    created_at        TIMESTAMP   NOT NULL DEFAULT now(),
+    updated_at        TIMESTAMP   NOT NULL DEFAULT now()
+);
 
+-- V4__create_patch_tasks.sql
+CREATE TABLE patch_tasks (
+    id           UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+    job_id       UUID        NOT NULL REFERENCES jobs(id),
+    minio_path   VARCHAR(512),
+    x            INTEGER     NOT NULL,
+    y            INTEGER     NOT NULL,
+    width        INTEGER     NOT NULL,
+    height       INTEGER     NOT NULL,
+    status       VARCHAR(20) NOT NULL DEFAULT 'PENDING',
+    attempts     INTEGER     NOT NULL DEFAULT 0,
+    heartbeat_at TIMESTAMP,
+    created_at   TIMESTAMP   NOT NULL DEFAULT now()
+);
 
--- CREATE TABLE users (
---     id SERIAL PRIMARY KEY,
---     username VARCHAR(50) UNIQUE,
---     name VARCHAR(50),
---     surname VARCHAR(50),
---     email VARCHAR(100) UNIQUE NOT NULL,
---     is_verify BOOLEAN,
---     password VARCHAR(255),
---     role VARCHAR(50) CHECK (role IN ('admin', 'user', 'organizer')),
---     status VARCHAR(50) CHECK (status IN ('active', 'inactive', 'suspended')) NOT NULL,
---     created_dttm TIMESTAMP DEFAULT NOW(),
---     updated_dttm TIMESTAMP DEFAULT NOW()
--- );
+CREATE INDEX idx_patch_tasks_job_id ON patch_tasks(job_id);
+CREATE INDEX idx_patch_tasks_status ON patch_tasks(status);
 
-
--- CREATE TABLE organizer_legal_info (
---     id SERIAL PRIMARY KEY,
---     user_id INTEGER REFERENCES users(id),
---     company_name VARCHAR(100),
---     contact_number VARCHAR(50),
---     approved BOOLEAN,
---     bank_account VARCHAR(50),
---     created_dttm TIMESTAMP DEFAULT NOW(),
---     updated_dttm TIMESTAMP DEFAULT NOW()
--- );
-
--- CREATE TABLE organizer_bank_details (
---     id SERIAL PRIMARY KEY,
---     legal_info_id INTEGER REFERENCES organizer_legal_info(id) NOT NULL,
---     bank_name VARCHAR(100) NOT NULL,
---     account_number VARCHAR(50) NOT NULL,
---     routing_number VARCHAR(50) NOT NULL,
---     swift_code VARCHAR(50),
---     created_dttm TIMESTAMP DEFAULT NOW(),
---     updated_dttm TIMESTAMP DEFAULT NOW()
--- );
-
--- CREATE TABLE matches (
---     id SERIAL PRIMARY KEY,
---     league VARCHAR(100),
---     uuid VARCHAR(255),
---     schedule_dt VARCHAR(100) NOT NULL,
---     schedule_time_lcl VARCHAR(100) NOT NULL,
---     stadium_name VARCHAR(255),
---     -- stadium_id INTEGER REFERENCES stadiums(id) NOT NULL,
---     tickets_cnt INTEGER NOT NULL,
---     info TEXT,
---     team_home_name VARCHAR(255) NOT NULL,
---     team_away_name VARCHAR(255) NOT NULL,
---     -- team_home_id INTEGER REFERENCES teams(id) NOT NULL,
---     -- team_away_id INTEGER REFERENCES teams(id) NOT NULL,
---     photo_url VARCHAR(255),
---     organizer_id INTEGER NOT NULL, -- REFERENCES users(id)
---     status VARCHAR(50) CHECK (status IN ('scheduled', 'ongoing', 'completed', 'cancelled')),
---     created_dttm TIMESTAMP DEFAULT NOW(),
---     updated_dttm TIMESTAMP DEFAULT NOW()
--- );
-
--- CREATE TABLE stadiums(
---     id SERIAL PRIMARY KEY,
---     name VARCHAR(100),
---     city VARCHAR(50)
--- );
-
--- CREATE TABLE seats (
---     id SERIAL PRIMARY KEY,
---     row INTEGER,
---     sector VARCHAR(255),
---     seat_number VARCHAR(100),
---     match_id INTEGER NOT NULL REFERENCES matches(id) ON DELETE CASCADE,
---     price DECIMAL(12,2),
---     stadium_id INTEGER NOT NULL REFERENCES stadiums(id) ON DELETE CASCADE,
---     status VARCHAR(50)
--- );
-
--- CREATE TABLE tickets (
---     id SERIAL PRIMARY KEY,
---     seat_id INTEGER  NOT NULL REFERENCES seats(id) ON DELETE CASCADE,
---     user_id INTEGER  NOT NULL REFERENCES users(id) ON DELETE CASCADE,
---     match_id INTEGER NOT NULL REFERENCES matches(id),
---     price INTEGER,
---     created_at TIMESTAMP DEFAULT NOW(),
---     updated_at TIMESTAMP,
---     statuc VARCHAR(50)
--- );
-
-
+-- V5__create_results.sql
+CREATE TABLE analysis_results (
+    id               SERIAL  PRIMARY KEY,
+    slide_id         INTEGER NOT NULL REFERENCES slides(id),
+    job_id           UUID    NOT NULL REFERENCES jobs(id),
+    eosinophil_count INTEGER NOT NULL DEFAULT 0,
+    detections       JSONB,
+    created_at       TIMESTAMP NOT NULL DEFAULT now()
+);

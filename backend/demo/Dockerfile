@@ -27,6 +27,11 @@ COPY --from=build /backend/target/*.jar /app/backend.jar
 # Копирование ресурсов
 COPY --from=build /backend/src/main/resources/templates /app/src/main/resources/templates
 
+FROM eclipse-temurin:21-jdk
+
+RUN apt-get update && apt-get install -y libopenslide-dev
+
+
 # Открытие порта приложения
 EXPOSE 8080
 

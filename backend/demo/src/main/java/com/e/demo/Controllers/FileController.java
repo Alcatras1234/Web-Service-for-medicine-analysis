@@ -31,17 +31,6 @@ public class FileController {
     return Map.of("uploadUrl", url, "objectKey", objectKey);
   }
 
-  public record CompleteUploadRequest(String objectKey) {}
 
-  @PostMapping("/complete-upload")
-  public void completeUpload(@RequestBody CompleteUploadRequest req) {
-    String wsiId = UUID.randomUUID().toString();
-    publisher.publishWsiUploaded(new WsiUploadedEvent(
-        wsiId,
-        bucket,
-        req.objectKey(),
-        512,
-        64
-    ));
-  }
+  
 }
