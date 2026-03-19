@@ -1,0 +1,126 @@
+version: "3.9"
+
+networks:
+  dev:
+    driver: bridge
+services:
+  # nginx:
+  #   image: nginx:stable-alpine
+  #   ports:
+  #     - "80:80"
+  #   volumes:
+  #     - './nginx.conf:/etc/nginx/nginx.conf'
+  #   depends_on:
+  #     - auth_db
+  #   networks:
+  #     - dev
+    
+  backend_db:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: "back_DB"
+      POSTGRES_USER: "amogus"
+      POSTGRES_PASSWORD: "1234"
+      PGDATA: "/var/lib/postgresql/data/pgdata"
+    volumes:
+      - auth_data:/var/lib/postgresql/data/pgdata
+    ports:
+      - "5432:5432"
+    networks:
+      - dev
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U amogus -d back_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 4G
+
+  minio:
+    image: minio/minio
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000" # API порт (куда клиент будет делать PUT)
+      - "9001:9001" # Консоль
+    networks:
+      - dev
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+
+
+  pgadmin:
+    image: dpage/pgadmin4
+    container_name: pgadmin
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@admin.com
+      PGADMIN_DEFAULT_PASSWORD: admin
+    ports:
+      - "5050:80"
+    depends_on:
+      - backend_db
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+    networks:
+      - dev
+
+  auth:
+    build:
+       context: ./demo
+       dockerfile: Dockerfile
+    container_name: server
+    hostname: server
+    ports:
+       - "8080:8080"
+    networks:
+       - dev
+  # redis:
+  #   image: redis:7-alpine
+  #   container_name: redis-container
+  #   ports:
+  #     - "6379:6379" # Проброс порта
+  #   volumes:
+  #     - redis-data:/data # Для сохранения данных
+  #   command: [ "redis-server", "--save", "60", "1", "--loglevel", "debug" ]
+  #   restart: unless-stopped
+  #   networks:
+  #     - dev
+  
+  liquibase-migrations:
+      container_name: migrations
+      image: liquibase/liquibase:4.29
+      depends_on:
+        - backend_db
+      command:
+        - --searchPath=/changesets
+        - --changelog-file=master.yaml
+        - --driver=org.postgresql.Driver
+        - --url=jdbc:postgresql://backend_db:5432/back_DB
+        - --username=amogus
+        - --password=1234
+        - update
+      volumes:
+        - ./db/init.sql:/changesets/init.sql
+        - ./db/master.yaml:/changesets/master.yaml
+      networks:
+        - dev
+  
+  rabbitmq:
+    image: rabbitmq:3-management
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    networks:
+      - dev
+
+
+volumes:
+  auth_data:
+  # redis-data:
+  pgadmin_data:
+
