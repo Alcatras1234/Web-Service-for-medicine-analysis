@@ -72,7 +72,7 @@ CREATE TABLE analysis_results (
 -- Хэш пароля "admin123" через BCrypt (можно сгенерировать на bcrypt-generator.com)
 INSERT INTO users (email, password_hash, full_name, role)
 VALUES ('admin@hospital.com', 
-        '$2a$10$N.zmdr9k7uOCQb376NoUnuTJ8iAt6Z5EHsM8lE9lBpwTTyU4Yvtm6', 
+        '123456', 
         'Administrator', 
         'ADMIN');
 -- Пароль: admin123

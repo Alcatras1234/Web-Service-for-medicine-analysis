@@ -1,3 +1,4 @@
+"proxy"
 import { NextRequest, NextResponse } from 'next/server'
 
 const PROTECTED = ['/dashboard', '/upload']
@@ -9,7 +10,7 @@ export function middleware(request: NextRequest) {
   if (isProtected) {
     const token = request.cookies.get('token')?.value
     if (!token) {
-      const loginUrl = new URL('/login', request.url)
+      const loginUrl = new URL('/', request.url)
       loginUrl.searchParams.set('from', pathname)
       return NextResponse.redirect(loginUrl)
     }
