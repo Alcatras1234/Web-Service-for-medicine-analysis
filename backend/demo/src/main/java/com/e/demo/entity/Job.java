@@ -25,6 +25,31 @@ public class Job {
     @Column(name = "patches_remaining")
     private Integer patchesRemaining = 0;
 
+    // Новые поля для результатов инференса
+    @Column(name = "total_eosinophil_count")
+    private Integer totalEosinophilCount = 0;
+
+    @Column(name = "max_hpf_count")
+    private Integer maxHpfCount = 0;
+
+    @Column(name = "max_hpf_x")
+    private Integer maxHpfX;
+
+    @Column(name = "max_hpf_y")
+    private Integer maxHpfY;
+
+    // POSITIVE (≥15 eos/HPF) или NEGATIVE
+    @Column(name = "diagnosis")
+    private String diagnosis;
+
+    // Путь к PDF в MinIO
+    @Column(name = "report_path")
+    private String reportPath;
+
+    // Путь к heatmap PNG в MinIO
+    @Column(name = "heatmap_path")
+    private String heatmapPath;
+
     @Column(name = "created_at")
     private Instant createdAt = Instant.now();
 

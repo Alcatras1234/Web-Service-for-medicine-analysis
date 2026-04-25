@@ -1,0 +1,26 @@
+name: "eosin_yolo"
+backend: "onnxruntime"
+max_batch_size: 0
+
+input [
+  {
+    name: "images"
+    data_type: TYPE_FP32
+    dims: [ 1, 3, 448, 448 ]
+  }
+]
+
+output [
+  {
+    name: "output0"
+    data_type: TYPE_FP32
+    dims: [ 1, 38, 8400 ]
+  }
+]
+
+instance_group [
+  {
+    kind: KIND_CPU
+    count: 4
+  }
+]

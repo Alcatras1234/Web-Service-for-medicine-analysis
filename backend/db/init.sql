@@ -76,3 +76,16 @@ VALUES ('admin@hospital.com',
         'Administrator', 
         'ADMIN');
 -- Пароль: admin123
+
+-- Новые колонки в patch_tasks
+ALTER TABLE patch_tasks ADD COLUMN IF NOT EXISTS eosinophil_count INT DEFAULT 0;
+ALTER TABLE patch_tasks ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ;
+
+-- Новые колонки в jobs
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS total_eosinophil_count INT DEFAULT 0;
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS max_hpf_count INT DEFAULT 0;
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS max_hpf_x INT;
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS max_hpf_y INT;
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS diagnosis VARCHAR(20);
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS report_path TEXT;
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS heatmap_path TEXT;
