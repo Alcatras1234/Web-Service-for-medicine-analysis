@@ -109,6 +109,47 @@
 			<scope>runtime</scope>
 		</dependency>
 
+				<!-- gRPC для Triton -->
+		<dependency>
+			<groupId>io.grpc</groupId>
+			<artifactId>grpc-netty-shaded</artifactId>
+			<version>1.62.2</version>
+		</dependency>
+		<dependency>
+			<groupId>io.grpc</groupId>
+			<artifactId>grpc-protobuf</artifactId>
+			<version>1.62.2</version>
+		</dependency>
+		<dependency>
+			<groupId>io.grpc</groupId>
+			<artifactId>grpc-stub</artifactId>
+			<version>1.62.2</version>
+		</dependency>
+		<dependency>
+			<groupId>com.google.protobuf</groupId>
+			<artifactId>protobuf-java</artifactId>
+			<version>3.25.3</version>
+		</dependency>
+		<!-- Нужно для @Generated в proto сгенерированных классах -->
+		<dependency>
+			<groupId>jakarta.annotation</groupId>
+			<artifactId>jakarta.annotation-api</artifactId>
+		</dependency>
+
+
+		<!-- PDF генерация -->
+		<dependency>
+			<groupId>com.itextpdf</groupId>
+			<artifactId>itext-core</artifactId>
+			<version>8.0.4</version>
+			<type>pom</type>
+		</dependency>
+		<!-- Jakarta annotation для @PreDestroy -->
+		<dependency>
+			<groupId>jakarta.annotation</groupId>
+			<artifactId>jakarta.annotation-api</artifactId>
+		</dependency>
+
 		
 		<dependency>
 			<groupId>org.projectlombok</groupId>
@@ -168,6 +209,35 @@
 					</excludes>
 				</configuration>
 			</plugin>
+			<plugin>
+			<groupId>com.github.os72</groupId>
+			<artifactId>protoc-jar-maven-plugin</artifactId>
+			<version>3.11.4</version>
+			<executions>
+				<execution>
+					<phase>generate-sources</phase>
+					<goals><goal>run</goal></goals>
+					<configuration>
+						<protocVersion>3.25.1</protocVersion>
+						<includeGoogleProtobuf>true</includeGoogleProtobuf>
+						<inputDirectories>
+							<include>src/main/proto</include>
+						</inputDirectories>
+						<outputTargets>
+							<outputTarget>
+								<type>java</type>
+								<outputDirectory>target/generated-sources/protobuf</outputDirectory>
+							</outputTarget>
+							<outputTarget>
+								<type>grpc-java</type>
+								<pluginArtifact>io.grpc:protoc-gen-grpc-java:1.62.2</pluginArtifact>
+								<outputDirectory>target/generated-sources/grpc</outputDirectory>
+							</outputTarget>
+						</outputTargets>
+					</configuration>
+				</execution>
+			</executions>
+		</plugin>
 		</plugins>
 	</build>
 

@@ -27,6 +27,10 @@ public class PatchTask {
     @Column(nullable = false)
     private String status = "PENDING";
 
+    // Результат инференса
+    @Column(name = "eosinophil_count")
+    private Integer eosinophilCount = 0;
+
     private int attempts;
 
     @Column(name = "heartbeat_at")
@@ -34,4 +38,7 @@ public class PatchTask {
 
     @Column(name = "created_at")
     private Instant createdAt = Instant.now();
+
+    @Column(name = "updated_at")
+    private Instant updatedAt;
 }
