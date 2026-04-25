@@ -60,4 +60,15 @@ public interface JobRepository extends JpaRepository<Job, UUID> {
                            @Param("reportPath") String reportPath,
                            @Param("heatmapPath") String heatmapPath,
                            @Param("now") Instant now);
+
+    @Modifying
+    @Transactional
+    @Query("""
+        UPDATE Job j SET j.status = :newStatus, j.updatedAt = :now
+        WHERE j.id = :jobId AND j.status = :expectedStatus
+        """)
+    int tryFinalizeJob(@Param("jobId") UUID jobId,
+                    @Param("expectedStatus") String expectedStatus,
+                    @Param("newStatus") String newStatus,
+                    @Param("now") Instant now);
 }
