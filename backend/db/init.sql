@@ -1,4 +1,3 @@
--- V1__create_users.sql
 CREATE TABLE users (
     id            SERIAL PRIMARY KEY,
     email         VARCHAR(255) NOT NULL UNIQUE,
@@ -8,7 +7,6 @@ CREATE TABLE users (
     created_at    TIMESTAMP    NOT NULL DEFAULT now()
 );
 
--- V2__create_refresh_tokens.sql
 CREATE TABLE refresh_tokens (
     id          BIGSERIAL PRIMARY KEY,
     user_id     INTEGER      NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -18,48 +16,53 @@ CREATE TABLE refresh_tokens (
     created_at  TIMESTAMP    NOT NULL DEFAULT now()
 );
 
--- V3__create_slides_and_jobs.sql
 CREATE TABLE slides (
     id          SERIAL PRIMARY KEY,
     user_id     INTEGER      NOT NULL REFERENCES users(id),
     filename    VARCHAR(255) NOT NULL,
     s3_path     VARCHAR(255) NOT NULL,
-    patient_id  VARCHAR(100),           -- ← ДОБАВЛЕНО
-    description TEXT,                   -- ← ДОБАВЛЕНО
-    status      VARCHAR(20) NOT NULL DEFAULT 'UPLOADED',
-    created_at  TIMESTAMP NOT NULL DEFAULT now()
+    patient_id  VARCHAR(100),
+    description TEXT,
+    status      VARCHAR(20)  NOT NULL DEFAULT 'UPLOADED',
+    created_at  TIMESTAMP    NOT NULL DEFAULT now()
 );
-
 
 CREATE TABLE jobs (
-    id                UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-    slide_id          INTEGER     NOT NULL REFERENCES slides(id),
-    status            VARCHAR(20) NOT NULL DEFAULT 'PENDING',
-    patches_total     INTEGER     NOT NULL DEFAULT 0,
-    patches_remaining INTEGER     NOT NULL DEFAULT 0,
-    created_at        TIMESTAMP   NOT NULL DEFAULT now(),
-    updated_at        TIMESTAMP   NOT NULL DEFAULT now()
+    id                    UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+    slide_id              INTEGER     NOT NULL REFERENCES slides(id),
+    status                VARCHAR(20) NOT NULL DEFAULT 'PENDING',
+    patches_total         INTEGER     NOT NULL DEFAULT 0,
+    patches_remaining     INTEGER     NOT NULL DEFAULT 0,
+    total_eosinophil_count INTEGER    NOT NULL DEFAULT 0,
+    max_hpf_count         INTEGER     NOT NULL DEFAULT 0,
+    max_hpf_x             INTEGER,
+    max_hpf_y             INTEGER,
+    diagnosis             VARCHAR(20),
+    report_path           TEXT,
+    heatmap_path          TEXT,
+    created_at            TIMESTAMP   NOT NULL DEFAULT now(),
+    updated_at            TIMESTAMP   NOT NULL DEFAULT now()
 );
 
--- V4__create_patch_tasks.sql
 CREATE TABLE patch_tasks (
-    id           UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-    job_id       UUID        NOT NULL REFERENCES jobs(id),
-    minio_path   VARCHAR(512),
-    x            INTEGER     NOT NULL,
-    y            INTEGER     NOT NULL,
-    width        INTEGER     NOT NULL,
-    height       INTEGER     NOT NULL,
-    status       VARCHAR(20) NOT NULL DEFAULT 'PENDING',
-    attempts     INTEGER     NOT NULL DEFAULT 0,
-    heartbeat_at TIMESTAMP,
-    created_at   TIMESTAMP   NOT NULL DEFAULT now()
+    id              UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+    job_id          UUID        NOT NULL REFERENCES jobs(id),
+    minio_path      VARCHAR(512),
+    x               INTEGER     NOT NULL,
+    y               INTEGER     NOT NULL,
+    width           INTEGER     NOT NULL,
+    height          INTEGER     NOT NULL,
+    status          VARCHAR(20) NOT NULL DEFAULT 'PENDING',
+    eosinophil_count INTEGER    NOT NULL DEFAULT 0,
+    attempts        INTEGER     NOT NULL DEFAULT 0,
+    heartbeat_at    TIMESTAMP,
+    created_at      TIMESTAMP   NOT NULL DEFAULT now(),
+    updated_at      TIMESTAMPTZ
 );
 
 CREATE INDEX idx_patch_tasks_job_id ON patch_tasks(job_id);
 CREATE INDEX idx_patch_tasks_status ON patch_tasks(status);
 
--- V5__create_results.sql
 CREATE TABLE analysis_results (
     id               SERIAL  PRIMARY KEY,
     slide_id         INTEGER NOT NULL REFERENCES slides(id),
@@ -69,23 +72,7 @@ CREATE TABLE analysis_results (
     created_at       TIMESTAMP NOT NULL DEFAULT now()
 );
 
--- Хэш пароля "admin123" через BCrypt (можно сгенерировать на bcrypt-generator.com)
 INSERT INTO users (email, password_hash, full_name, role)
-VALUES ('admin@hospital.com', 
-        '$2a$12$BBqpeicbGUtRoWd/R24gz.ugsXQ96C.Pt4JfJz2WbpzXGoqGNFYdW', 
-        'Administrator', 
-        'ADMIN');
--- Пароль: admin123
-
--- Новые колонки в patch_tasks
-ALTER TABLE patch_tasks ADD COLUMN IF NOT EXISTS eosinophil_count INT DEFAULT 0;
-ALTER TABLE patch_tasks ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ;
-
--- Новые колонки в jobs
-ALTER TABLE jobs ADD COLUMN IF NOT EXISTS total_eosinophil_count INT DEFAULT 0;
-ALTER TABLE jobs ADD COLUMN IF NOT EXISTS max_hpf_count INT DEFAULT 0;
-ALTER TABLE jobs ADD COLUMN IF NOT EXISTS max_hpf_x INT;
-ALTER TABLE jobs ADD COLUMN IF NOT EXISTS max_hpf_y INT;
-ALTER TABLE jobs ADD COLUMN IF NOT EXISTS diagnosis VARCHAR(20);
-ALTER TABLE jobs ADD COLUMN IF NOT EXISTS report_path TEXT;
-ALTER TABLE jobs ADD COLUMN IF NOT EXISTS heatmap_path TEXT;
+VALUES ('admin@hospital.com',
+        '$2a$12$BBqpeicbGUtRoWd/R24gz.ugsXQ96C.Pt4JfJz2WbpzXGoqGNFYdW',
+        'Administrator', 'ADMIN');
