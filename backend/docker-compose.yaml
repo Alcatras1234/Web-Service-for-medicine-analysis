@@ -118,6 +118,26 @@ services:
     networks:
       - dev
 
+    triton:
+      image: nvcr.io/nvidia/tritonserver:24.01-py3-cpu
+      container_name: triton
+      ports:
+        - "8000:8000"
+        - "8001:8001"
+        - "8002:8002"
+      volumes:
+        - ./model_repository:/models
+      command: >
+        tritonserver
+        --model-repository=/models
+        --http-thread-count=8
+      healthcheck:
+        test: ["CMD", "curl", "-f", "http://localhost:8000/v2/health/ready"]
+        interval: 15s
+        timeout: 10s
+        retries: 10
+      restart: unless-stopped
+
 
 volumes:
   auth_data:

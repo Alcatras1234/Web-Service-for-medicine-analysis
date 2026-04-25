@@ -19,6 +19,7 @@ import java.io.*;
 import java.nio.file.*;
 import java.time.Instant;
 import java.util.UUID;
+import java.util.List;
 
 @Component
 @Slf4j
@@ -52,7 +53,7 @@ public class InferenceWorker {
         Path tmp = null;
         try {
             tmp = Files.createTempFile("patch-", ".png");
-            downloadToFile(event.patchPath(), tmp);
+            downloadToFile(event.s3Path(), tmp);
 
             BufferedImage img = ImageIO.read(tmp.toFile());
             float[] tensor = toFloat32CHW(img, 448, 448);
@@ -82,6 +83,14 @@ public class InferenceWorker {
     }
 
     private void checkAndFinalizeJob(UUID jobId) {
+        // Считаем именно IN_PROGRESS — патчи которые ещё не DONE и не FAILED
+        long notDone = patchTaskRepository.countByJobIdAndStatusNotIn(jobId, List.of("DONE", "FAILED"));
+        if (notDone != 0) return;
+
+        // Атомарно помечаем job как FINALIZING чтобы только один поток прошёл дальше
+        int updated = jobRepository.tryFinalizeJob(jobId, "PROCESSING", "FINALIZING", Instant.now());
+        if (updated == 0) return; // другой воркер уже взял финализацию
+        
         long pending = patchTaskRepository.countByJobIdAndStatus(jobId, "PENDING");
         if (pending != 0) return;
 
