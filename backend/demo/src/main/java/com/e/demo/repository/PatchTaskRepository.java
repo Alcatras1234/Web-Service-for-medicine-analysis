@@ -9,18 +9,16 @@ import java.util.UUID;
 
 public interface PatchTaskRepository extends JpaRepository<PatchTask, UUID> {
 
+    // ДОБАВИТЬ — этого метода не было!
     long countByJobIdAndStatus(UUID jobId, String status);
 
-    // Сумма всех эозинофилов по джобу
     @Query("SELECT COALESCE(SUM(p.eosinophilCount), 0) FROM PatchTask p WHERE p.jobId = :jobId")
     int sumEosinophilCountByJobId(@Param("jobId") UUID jobId);
 
-    // Патч с максимальным кол-вом клеток (для PDF отчёта)
     PatchTask findTopByJobIdOrderByEosinophilCountDesc(UUID jobId);
 
-    // Все патчи джоба для heatmap
     List<PatchTask> findAllByJobId(UUID jobId);
 
     @Query("SELECT COUNT(p) FROM PatchTask p WHERE p.jobId = :jobId AND p.status NOT IN :statuses")
-    long countByJobIdAndStatusNotIn(@Param("jobId") UUID jobId, @Param("statuses") List<String> statuses);  
+    long countByJobIdAndStatusNotIn(@Param("jobId") UUID jobId, @Param("statuses") List<String> statuses);
 }

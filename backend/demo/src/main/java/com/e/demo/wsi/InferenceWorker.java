@@ -20,6 +20,8 @@ import java.nio.file.*;
 import java.time.Instant;
 import java.util.UUID;
 import java.util.List;
+import java.awt.Graphics2D;
+import java.awt.RenderingHints;  
 
 @Component
 @Slf4j
@@ -133,7 +135,11 @@ public class InferenceWorker {
     private float[] toFloat32CHW(BufferedImage img, int W, int H) {
         if (img.getWidth() != W || img.getHeight() != H) {
             BufferedImage r = new BufferedImage(W, H, BufferedImage.TYPE_INT_RGB);
-            r.getGraphics().drawImage(img, 0, 0, W, H, null);
+            Graphics2D g2d = r.createGraphics();
+            g2d.setRenderingHint(RenderingHints.KEY_INTERPOLATION,
+                                RenderingHints.VALUE_INTERPOLATION_BILINEAR);
+            g2d.drawImage(img, 0, 0, W, H, null);
+            g2d.dispose();
             img = r;
         }
         float[] data = new float[3 * W * H];
@@ -141,9 +147,9 @@ public class InferenceWorker {
             for (int x = 0; x < W; x++) {
                 int rgb = img.getRGB(x, y);
                 int o = y * W + x;
-                data[o]           = ((rgb >> 16) & 0xFF) / 255.0f; // R
-                data[W * H + o]   = ((rgb >> 8)  & 0xFF) / 255.0f; // G
-                data[2 * W * H + o] = (rgb & 0xFF) / 255.0f;       // B
+                data[o]         = ((rgb >> 16) & 0xFF) / 255.0f;
+                data[W*H + o]   = ((rgb >>  8) & 0xFF) / 255.0f;
+                data[2*W*H + o] = ( rgb        & 0xFF) / 255.0f;
             }
         }
         return data;
