@@ -123,25 +123,18 @@ services:
       - dev
 
   triton:
-      image: nvcr.io/nvidia/tritonserver:24.01-py3
-      container_name: triton
-      command: tritonserver --model-repository=/models --log-verbose=1
-      volumes:
-        - ./triton-models:/models
-      ports:
-        - "8000:8000"   # HTTP
-        - "8001:8001"   # gRPC ← твой клиент
-        - "8002:8002"   # Metrics
-      deploy:
-        resources:
-          reservations:
-            devices:
-              - driver: nvidia
-                count: all
-                capabilities: [gpu]
-      restart: unless-stopped
-      networks:
-        - dev
+    image: nvcr.io/nvidia/tritonserver:24.01-py3
+    container_name: triton
+    command: tritonserver --model-repository=/models --log-verbose=1
+    volumes:
+      - ./triton-model:/models
+    ports:
+      - "8000:8000"
+      - "8001:8001"
+      - "8002:8002"
+    networks:
+      - dev
+    restart: unless-stopped
 
 
 volumes:
