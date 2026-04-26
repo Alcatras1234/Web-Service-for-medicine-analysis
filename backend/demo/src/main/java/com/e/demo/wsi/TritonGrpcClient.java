@@ -6,10 +6,11 @@ import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
-
 import jakarta.annotation.PreDestroy;
+
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.util.ArrayList;
 import java.util.List;
 
 @Component
@@ -17,9 +18,9 @@ public class TritonGrpcClient {
 
     private static final float CONF_THRESHOLD = 0.25f;
     private static final float IOU_THRESHOLD  = 0.45f;
-    private static final int   NUM_CLASSES    = 2;     // eos, eosg
+    private static final int   NUM_CLASSES    = 2;
     private static final int   NUM_ANCHORS    = 4116;
-    private static final int   ROW_SIZE       = 116;   // 4 + 2cls + 110mask_coeffs
+    private static final int   ROW_SIZE       = 116;
 
     private final GRPCInferenceServiceGrpc.GRPCInferenceServiceBlockingStub stub;
     private final ManagedChannel channel;
@@ -37,51 +38,46 @@ public class TritonGrpcClient {
         this.stub = GRPCInferenceServiceGrpc.newBlockingStub(channel);
     }
 
-    /**
-     * Запускает инференс и возвращает количество эозинофилов (класс 0 = eos).
-     */
     public int infer(float[] imageTensor) {
         // Сериализуем float[] → bytes
         ByteBuffer buf = ByteBuffer.allocate(imageTensor.length * 4)
                 .order(ByteOrder.LITTLE_ENDIAN);
         for (float v : imageTensor) buf.putFloat(v);
+        com.google.protobuf.ByteString rawBytes =
+                com.google.protobuf.ByteString.copyFrom(buf.array());
 
-        InferInputTensor input = InferInputTensor.newBuilder()
-                .setName("images")
-                .setDatatype("FP32")
-                .addShape(1).addShape(3).addShape(448).addShape(448)
-                .setContents(InferTensorContents.newBuilder()
-                        .setRawContents(
-                                com.google.protobuf.ByteString.copyFrom(buf.array())))
-                .build();
+        // Input тензор — только метаданные, данные идут в raw_input_contents
+        ModelInferRequest.InferInputTensor inputMeta =
+                ModelInferRequest.InferInputTensor.newBuilder()
+                        .setName("images")
+                        .setDatatype("FP32")
+                        .addShape(1).addShape(3).addShape(448).addShape(448)
+                        .build();
 
-        InferOutputTensor reqOut0 = InferOutputTensor.newBuilder().setName("output0").build();
+        // Запрашиваем output0
+        ModelInferRequest.InferRequestedOutputTensor reqOut =
+                ModelInferRequest.InferRequestedOutputTensor.newBuilder()
+                        .setName("output0")
+                        .build();
 
         ModelInferRequest request = ModelInferRequest.newBuilder()
                 .setModelName(modelName)
-                .addInputs(input)
-                .addOutputs(reqOut0)
+                .addInputs(inputMeta)
+                .addOutputs(reqOut)
+                .addRawInputContents(rawBytes)   // ← данные здесь
                 .build();
 
         ModelInferResponse response = stub.modelInfer(request);
 
-        // Читаем output0: [1, 116, 4116]
-        byte[] raw = response.getRawOutputContentsList().isEmpty()
-                ? response.getOutputs(0).getContents().getRawContents().toByteArray()
-                : response.getRawOutputContents(0).toByteArray();
-
+        // Читаем raw_output_contents[0] → output0: [1, 116, 4116]
+        byte[] raw = response.getRawOutputContents(0).toByteArray();
         float[] output0 = bytesToFloats(raw);
-        // output0 имеет форму [116, 4116] (batch=1 убрали)
-        // Транспонируем: для каждого anchor [4116] берём row [116]
+
         return parseAndCount(output0);
     }
 
     private int parseAndCount(float[] output0) {
-        // output0 layout: [ROW_SIZE=116][NUM_ANCHORS=4116]
-        // Для каждого anchor i: row = output0[j * NUM_ANCHORS + i]
-        // cx=row[0], cy=row[1], w=row[2], h=row[3]
-        // class scores: row[4]..row[4+NUM_CLASSES-1]
-
+        // layout: [ROW_SIZE=116][NUM_ANCHORS=4116]
         float[][] boxes  = new float[NUM_ANCHORS][4];
         float[][] scores = new float[NUM_ANCHORS][NUM_CLASSES];
 
@@ -95,8 +91,7 @@ public class TritonGrpcClient {
             }
         }
 
-        // Фильтрация по confidence + NMS
-        List<float[]> detections = new java.util.ArrayList<>();
+        List<float[]> detections = new ArrayList<>();
         for (int i = 0; i < NUM_ANCHORS; i++) {
             int bestClass = 0;
             float bestScore = scores[i][0];
@@ -117,14 +112,13 @@ public class TritonGrpcClient {
         }
 
         List<float[]> kept = nms(detections, IOU_THRESHOLD);
-
-        // Считаем только eos (class 0)
-        return (int) kept.stream().filter(d -> d[5] == 0).count();
+        // Считаем оба класса (eos=0 и eosg=1 — оба эозинофилы)
+        return kept.size();
     }
 
     private List<float[]> nms(List<float[]> dets, float iouThresh) {
         dets.sort((a, b) -> Float.compare(b[4], a[4]));
-        List<float[]> result = new java.util.ArrayList<>();
+        List<float[]> result = new ArrayList<>();
         boolean[] suppressed = new boolean[dets.size()];
         for (int i = 0; i < dets.size(); i++) {
             if (suppressed[i]) continue;
