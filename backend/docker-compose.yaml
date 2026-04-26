@@ -77,6 +77,10 @@ services:
     hostname: server
     ports:
        - "8080:8080"
+    depends_on:
+        - backend_db
+        - rabbitmq
+        - triton
     networks:
        - dev
   # redis:
@@ -136,6 +140,8 @@ services:
                 count: all
                 capabilities: [gpu]
       restart: unless-stopped
+      networks:
+        - dev
 
 
 volumes:

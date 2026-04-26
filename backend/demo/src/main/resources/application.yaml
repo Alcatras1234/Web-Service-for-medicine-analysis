@@ -15,6 +15,10 @@ spring:
     properties:
       hibernate:
         dialect: org.hibernate.dialect.PostgreSQLDialect
+        jdbc:
+          batch_size: 200
+        order_inserts: true
+        order_updates: true
 
   rabbitmq:
     host: rabbitmq
@@ -23,9 +27,9 @@ spring:
     password: guest
 
 minio:
-  accessKey: minioadmin
-  secretKey: minioadmin
-  bucketName: photos
+  access-key: minioadmin
+  secret-key: minioadmin
+  bucketName: wsi-bucket 
   url: http://localhost:9000
   internalUrl: http://minio:9000
 
