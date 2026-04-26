@@ -5,7 +5,7 @@
 	<parent>
 		<groupId>org.springframework.boot</groupId>
 		<artifactId>spring-boot-starter-parent</artifactId>
-		<version>4.0.1</version>
+		<version>3.4.5</version>
 		<relativePath/> <!-- lookup parent from repository -->
 	</parent>
 	<groupId>com.e</groupId>
@@ -42,11 +42,7 @@
 		</dependency>
 		<dependency>
 			<groupId>org.springframework.boot</groupId>
-			<artifactId>spring-boot-starter-webmvc</artifactId>
-		</dependency>
-		<dependency>
-			<groupId>org.springframework.boot</groupId>
-			<artifactId>spring-boot-starter-restclient</artifactId>
+			<artifactId>spring-boot-starter-web</artifactId>
 		</dependency>
 		<dependency>
 			<groupId>org.springframework.boot</groupId>
@@ -144,11 +140,6 @@
 			<version>8.0.4</version>
 			<type>pom</type>
 		</dependency>
-		<!-- Jakarta annotation для @PreDestroy -->
-		<dependency>
-			<groupId>jakarta.annotation</groupId>
-			<artifactId>jakarta.annotation-api</artifactId>
-		</dependency>
 
 		
 		<dependency>
@@ -158,27 +149,12 @@
 		</dependency>
 		<dependency>
 			<groupId>org.springframework.boot</groupId>
-			<artifactId>spring-boot-starter-jdbc-test</artifactId>
+			<artifactId>spring-boot-starter-test</artifactId>
 			<scope>test</scope>
 		</dependency>
 		<dependency>
-			<groupId>org.springframework.boot</groupId>
-			<artifactId>spring-boot-starter-restclient-test</artifactId>
-			<scope>test</scope>
-		</dependency>
-		<dependency>
-			<groupId>org.springframework.boot</groupId>
-			<artifactId>spring-boot-starter-security-test</artifactId>
-			<scope>test</scope>
-		</dependency>
-		<dependency>
-			<groupId>org.springframework.boot</groupId>
-			<artifactId>spring-boot-starter-session-jdbc-test</artifactId>
-			<scope>test</scope>
-		</dependency>
-		<dependency>
-			<groupId>org.springframework.boot</groupId>
-			<artifactId>spring-boot-starter-webmvc-test</artifactId>
+			<groupId>org.springframework.security</groupId>
+			<artifactId>spring-security-test</artifactId>
 			<scope>test</scope>
 		</dependency>
 	</dependencies>
@@ -210,34 +186,34 @@
 				</configuration>
 			</plugin>
 			<plugin>
-			<groupId>com.github.os72</groupId>
-			<artifactId>protoc-jar-maven-plugin</artifactId>
-			<version>3.11.4</version>
-			<executions>
-				<execution>
-					<phase>generate-sources</phase>
-					<goals><goal>run</goal></goals>
-					<configuration>
-						<protocVersion>3.25.1</protocVersion>
-						<includeGoogleProtobuf>true</includeGoogleProtobuf>
-						<inputDirectories>
-							<include>src/main/proto</include>
-						</inputDirectories>
-						<outputTargets>
-							<outputTarget>
-								<type>java</type>
-								<outputDirectory>target/generated-sources/protobuf</outputDirectory>
-							</outputTarget>
-							<outputTarget>
-								<type>grpc-java</type>
-								<pluginArtifact>io.grpc:protoc-gen-grpc-java:1.62.2</pluginArtifact>
-								<outputDirectory>target/generated-sources/grpc</outputDirectory>
-							</outputTarget>
-						</outputTargets>
-					</configuration>
-				</execution>
-			</executions>
-		</plugin>
+				<groupId>com.github.os72</groupId>
+				<artifactId>protoc-jar-maven-plugin</artifactId>
+				<version>3.11.4</version>
+				<executions>
+					<execution>
+						<phase>generate-sources</phase>
+						<goals><goal>run</goal></goals>
+						<configuration>
+							<protocVersion>3.25.3</protocVersion>
+							<includeGoogleProtobuf>true</includeGoogleProtobuf>
+							<inputDirectories>
+								<include>src/main/proto</include>
+							</inputDirectories>
+							<outputTargets>
+								<outputTarget>
+									<type>java</type>
+									<outputDirectory>target/generated-sources/protobuf/java</outputDirectory>
+								</outputTarget>
+								<outputTarget>
+									<type>grpc-java</type>
+									<pluginArtifact>io.grpc:protoc-gen-grpc-java:1.62.2</pluginArtifact>
+									<outputDirectory>target/generated-sources/protobuf/grpc-java</outputDirectory>
+								</outputTarget>
+							</outputTargets>
+						</configuration>
+					</execution>
+				</executions>
+			</plugin>
 		</plugins>
 	</build>
 
