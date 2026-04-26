@@ -127,7 +127,7 @@ services:
     container_name: triton
     command: tritonserver --model-repository=/models --log-verbose=1
     volumes:
-      - ./triton-model:/models
+      - ./triton-models:/models
     ports:
       - "8000:8000"
       - "8001:8001"

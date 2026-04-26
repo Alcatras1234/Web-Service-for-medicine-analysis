@@ -48,6 +48,6 @@ triton:
   grpc:
     host: triton
     port: 8001
-  modelName: eosin_yolo
+  modelName: eosin-yolo
 
 
