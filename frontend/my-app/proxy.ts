@@ -1,9 +1,8 @@
-"proxy"
 import { NextRequest, NextResponse } from 'next/server'
 
 const PROTECTED = ['/dashboard', '/upload']
 
-export function middleware(request: NextRequest) {
+export default function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl
   const isProtected = PROTECTED.some(path => pathname.startsWith(path))
 
