@@ -1,0 +1,30 @@
+# Virtual environment
+inference-venv/
+venv/
+.venv/
+env/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Model weights (большие файлы)
+*.pt
+*.onnx
+*.weights
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# Java build
+target/
+*.class
+*.jar
+
+# OS
+.DS_Store
+Thumbs.db
