@@ -21,4 +21,10 @@ public interface PatchTaskRepository extends JpaRepository<PatchTask, UUID> {
 
     @Query("SELECT COUNT(p) FROM PatchTask p WHERE p.jobId = :jobId AND p.status NOT IN :statuses")
     long countByJobIdAndStatusNotIn(@Param("jobId") UUID jobId, @Param("statuses") List<String> statuses);
+
+    // Для определения крайних патчей
+    boolean existsByJobIdAndXAndY(UUID jobId, int x, int y);
+
+    // Для sliding window
+    List<PatchTask> findByJobIdAndStatus(UUID jobId, String status);
 }

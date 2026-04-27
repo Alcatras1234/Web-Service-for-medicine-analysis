@@ -56,6 +56,7 @@ CREATE TABLE patch_tasks (
     eosinophil_count INTEGER     NOT NULL DEFAULT 0,
     attempts         INTEGER     NOT NULL DEFAULT 0,
     heartbeat_at     TIMESTAMPTZ,
+    total_count      INTEGER     NOT NULL DEFAULT 0,
     created_at       TIMESTAMP   NOT NULL DEFAULT now(),
     updated_at       TIMESTAMPTZ
 );

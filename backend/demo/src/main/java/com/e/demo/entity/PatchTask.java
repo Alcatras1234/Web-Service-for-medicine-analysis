@@ -36,6 +36,9 @@ public class PatchTask {
     @Column(name = "heartbeat_at")
     private Instant heartbeatAt;
 
+    @Column(name = "total_count")
+    private int totalCount;
+
     @Column(name = "created_at")
     private Instant createdAt = Instant.now();
 

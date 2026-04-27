@@ -27,9 +27,9 @@ import java.util.concurrent.*;
 @Slf4j
 public class TilingWorker {
 
-    private static final int PATCH_SIZE    = 512;
-    private static final int OVERLAP       = 64;
-    private static final int STEP          = PATCH_SIZE - OVERLAP; // 448
+    private static final int PATCH_SIZE    = 448;
+    private static final int OVERLAP       = 24;
+    private static final int STEP          = PATCH_SIZE - OVERLAP; // 424
 
     // Сколько патчей обрабатываем одновременно в памяти
     private static final int BATCH_SIZE    = 50;
