@@ -30,7 +30,7 @@ public class InferenceWorker {
     private final MinioClient minioClient;
     private final PatchTaskRepository patchTaskRepository;
     private final JobRepository jobRepository;
-    private final TritonGrpcClient tritonClient;
+    private final InferenceHttpClient inferenceClient;
     private final ReportService reportService;
 
     @Value("${minio.bucketName}")
@@ -39,12 +39,12 @@ public class InferenceWorker {
     public InferenceWorker(@Qualifier("internalClient") MinioClient minioClient,
                            PatchTaskRepository patchTaskRepository,
                            JobRepository jobRepository,
-                           TritonGrpcClient tritonClient,
+                           InferenceHttpClient inferenceHttpClientClient,
                            ReportService reportService) {
         this.minioClient = minioClient;
         this.patchTaskRepository = patchTaskRepository;
         this.jobRepository = jobRepository;
-        this.tritonClient = tritonClient;
+        this.inferenceClient = inferenceHttpClientClient;
         this.reportService = reportService;
     }
 
@@ -60,7 +60,7 @@ public class InferenceWorker {
             BufferedImage img = ImageIO.read(tmp.toFile());
             float[] tensor = toFloat32CHW(img, 448, 448);
 
-            int count = tritonClient.infer(tensor);
+            int count = inferenceClient.infer(tensor);
             log.info("Patch {} → {} eos", event.patchId(), count);
 
             savePatchResult(event.patchId(), "DONE", count);
