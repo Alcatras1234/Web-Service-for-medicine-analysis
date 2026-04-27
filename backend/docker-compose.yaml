@@ -123,7 +123,8 @@ services:
       - dev
 
   triton:
-      image: nvcr.io/nvidia/tritonserver:24.01-py3
+      image: nvcr.io/nvidia/tritonserver:25.02-py3
+      runtime: nvidia
       command: tritonserver --model-repository=/models
       volumes:
         - ./triton-models:/models
@@ -131,14 +132,12 @@ services:
         - "8000:8000"
         - "8001:8001"
         - "8002:8002"
-      deploy:
-        resources:
-          reservations:
-            devices:
-              - driver: nvidia
-                count: 1
-                capabilities: [gpu]
+      environment:
+        - NVIDIA_VISIBLE_DEVICES=all           # ← добавь это
+        - NVIDIA_DRIVER_CAPABILITIES=compute,utility
       restart: unless-stopped
+      networks:
+        - dev
 
 
 volumes:
