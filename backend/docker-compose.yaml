@@ -80,7 +80,6 @@ services:
     depends_on:
         - backend_db
         - rabbitmq
-        - triton
     networks:
        - dev
   # redis:
@@ -120,25 +119,7 @@ services:
       - "5672:5672"
       - "15672:15672"
     networks:
-      - dev
-
-  triton:
-      image: nvcr.io/nvidia/tritonserver:25.02-py3
-      runtime: nvidia
-      command: tritonserver --model-repository=/models
-      volumes:
-        - ./triton-models:/models
-      ports:
-        - "8000:8000"
-        - "8001:8001"
-        - "8002:8002"
-      environment:
-        - NVIDIA_VISIBLE_DEVICES=all           # ← добавь это
-        - NVIDIA_DRIVER_CAPABILITIES=compute,utility
-      restart: unless-stopped
-      networks:
-        - dev
-
+      - dev 
 
 volumes:
   auth_data:
