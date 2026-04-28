@@ -25,6 +25,9 @@ spring:
     port: 5672
     username: guest
     password: guest
+    listener:
+      simple:
+        prefetch: 32
 
 minio:
   access-key: minioadmin

@@ -1,44 +1,107 @@
-from fastapi import FastAPI
-from pydantic import BaseModel
-from PIL import Image
-import base64, io, numpy as np, os, shutil
+import asyncio
+import base64
+import io
 import logging
+import os
+import shutil
+import struct
+
+import cv2
+import numpy as np
 import onnxruntime as ort
+from fastapi import FastAPI
+from PIL import Image
+from pydantic import BaseModel
 
+import os
 
+# ── Auto-fix cuDNN/cuBLAS PATH на Windows ────────────────────────────────────
+_site = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                     "..", "inference-venv", "Lib", "site-packages", "nvidia")
+for _pkg in ("cudnn", "cublas", "cuda_runtime", "cufft", "curand"):
+    _bin = os.path.normpath(os.path.join(_site, _pkg, "bin"))
+    if os.path.isdir(_bin):
+        os.environ["PATH"] = _bin + os.pathsep + os.environ.get("PATH", "")
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(levelname)s  %(message)s")
 logger = logging.getLogger(__name__)
 
-app = FastAPI()
+# ── Config ────────────────────────────────────────────────────────────────────
+MODEL_PATH  = os.environ.get("MODEL_PATH", "./triton-models/eosin_yolo/1/best.onnx")
+CONF_THRESH = float(os.environ.get("CONF_THRESH", "0.15"))
+IOU_THRESH  = float(os.environ.get("IOU_THRESH",  "0.5"))
+INPUT_SIZE  = int(os.environ.get("INPUT_SIZE",    "448"))
+CONCURRENCY = int(os.environ.get("CONCURRENCY",   "8"))
 
-# ── Путь к модели ─────────────────────────────────────────────────────────────
-# ↓↓↓ ПОМЕНЯЙ НА СВОЙ ПУТЬ К best.onnx ↓↓↓
-ONNX_PATH = os.environ.get("MODEL_PATH", "./triton-models/eosin_yolo/1/best.onnx")
+# ── ONNX Runtime + Tensor Cores ───────────────────────────────────────────────
+# TensorRT EP использует Tensor Cores автоматически (FP16/INT8)
+# CUDAExecutionProvider тоже задействует их через cuDNN
 
-providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
-session = ort.InferenceSession(ONNX_PATH, providers=providers)
+_available = ort.get_available_providers()
+logger.info(f"Available ORT providers: {_available}")
 
-INPUT_NAME  = session.get_inputs()[0].name   # "images"
-OUTPUT_NAME = session.get_outputs()[0].name  # "output0"
+# Пробуем TensorRT → CUDA → CPU (в порядке приоритета)
+if "TensorrtExecutionProvider" in _available:
+    providers = [
+        (
+            "TensorrtExecutionProvider",
+            {
+                "trt_fp16_enable": True,          # FP16 → Tensor Cores
+                "trt_max_workspace_size": 1 << 30, # 1 GB
+            },
+        ),
+        (
+            "CUDAExecutionProvider",
+            {"cudnn_conv_use_max_workspace": "1"},
+        ),
+        "CPUExecutionProvider",
+    ]
+    logger.info("Using TensorRT EP (FP16 Tensor Cores)")
+elif "CUDAExecutionProvider" in _available:
+    providers = [
+        (
+            "CUDAExecutionProvider",
+            {
+                "cudnn_conv_use_max_workspace": "1",
+                "do_copy_in_default_stream": True,
+            },
+        ),
+        "CPUExecutionProvider",
+    ]
+    logger.info("Using CUDA EP")
+else:
+    logger.warning("GPU not available")
 
-# Имена классов из твоей модели
+sess_opts = ort.SessionOptions()
+sess_opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+sess_opts.intra_op_num_threads = 4
+
+sess        = ort.InferenceSession(MODEL_PATH, sess_options=sess_opts, providers=providers)
+input_name  = sess.get_inputs()[0].name
+output_name = sess.get_outputs()[0].name
+
+# Имена классов — YOLO11 seg ONNX не хранит names, задаём вручную
+# Порядок должен совпадать с тем, как экспортировалась модель
 CLASS_NAMES = {0: "eos", 1: "eosg"}
 
-logger.info(f"Model loaded: {ONNX_PATH}")
-logger.info(f"Providers active: {session.get_providers()}")
-logger.info(f"Input:  {INPUT_NAME} {session.get_inputs()[0].shape}")
-logger.info(f"Output: {OUTPUT_NAME} {session.get_outputs()[0].shape}")
+logger.info(f"Model loaded: {MODEL_PATH}")
+logger.info(f"Active providers: {sess.get_providers()}")
+logger.info(f"Classes: {CLASS_NAMES}")
 
+# ── FastAPI ───────────────────────────────────────────────────────────────────
+app  = FastAPI()
+_sem = asyncio.Semaphore(CONCURRENCY)
 
 @app.on_event("startup")
 def cleanup_runs():
     shutil.rmtree("runs", ignore_errors=True)
     logger.info("Cleared YOLO runs cache")
 
-
+# ── Schemas ───────────────────────────────────────────────────────────────────
 class InferRequest(BaseModel):
     image_base64: str
-
 
 class TensorRequest(BaseModel):
     tensor_base64:  str
@@ -49,65 +112,123 @@ class TensorRequest(BaseModel):
     edge_right:     bool = False
     edge_bottom:    bool = False
 
+# ── Preprocessing ─────────────────────────────────────────────────────────────
+def to_nchw(img_bgr: np.ndarray) -> np.ndarray:
+    """uint8 HWC BGR → float32 NCHW [0..1] resized to INPUT_SIZE"""
+    resized = cv2.resize(img_bgr, (INPUT_SIZE, INPUT_SIZE))
+    rgb     = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
+    nchw    = rgb.transpose(2, 0, 1).astype(np.float32) / 255.0
+    return nchw[np.newaxis, ...]  # (1, 3, H, W)
 
+# ── NMS ───────────────────────────────────────────────────────────────────────
+def run_nms(output: np.ndarray):
+    """
+    YOLO11 detect ONNX output shape: (1, num_classes+4, 8400)
+    Returns list of (cls_id, cx, cy, conf)
+    """
+    preds  = output[0]                          # (C+4, 8400)
+    coords = preds[:4, :].T                     # (8400, 4) xywh
+    scores = preds[4:, :]                       # (num_cls, 8400)
+
+    cls_ids     = scores.argmax(axis=0)         # (8400,)
+    cls_scores  = scores.max(axis=0)            # (8400,)
+
+    mask   = cls_scores > CONF_THRESH
+    coords  = coords[mask]
+    cls_ids = cls_ids[mask]
+    confs   = cls_scores[mask]
+
+    if len(coords) == 0:
+        return []
+
+    x1 = coords[:, 0] - coords[:, 2] / 2
+    y1 = coords[:, 1] - coords[:, 3] / 2
+    x2 = coords[:, 0] + coords[:, 2] / 2
+    y2 = coords[:, 1] + coords[:, 3] / 2
+    xyxy = np.stack([x1, y1, x2, y2], axis=1).astype(np.float32)
+
+    indices = cv2.dnn.NMSBoxes(
+        xyxy.tolist(), confs.tolist(), CONF_THRESH, IOU_THRESH
+    )
+    if len(indices) == 0:
+        return []
+
+    detections = []
+    for i in indices:
+        idx = int(i)
+        cx  = float((x1[idx] + x2[idx]) / 2)
+        cy  = float((y1[idx] + y2[idx]) / 2)
+        detections.append({
+            "cls_id": int(cls_ids[idx]),
+            "cx":     cx,
+            "cy":     cy,
+            "x1":     float(x1[idx]),
+            "y1":     float(y1[idx]),
+            "x2":     float(x2[idx]),
+            "y2":     float(y2[idx]),
+            "conf":   float(confs[idx]),
+        })
+    return detections
+
+# ── Raw inference ─────────────────────────────────────────────────────────────
+def _run_sess(nchw: np.ndarray) -> np.ndarray:
+    return sess.run([output_name], {input_name: nchw})[0]
+
+# ── Endpoints ─────────────────────────────────────────────────────────────────
 @app.get("/health")
 def health():
     return {
         "status":    "ok",
-        "model":     ONNX_PATH,
-        "providers": session.get_providers(),
+        "model":     MODEL_PATH,
+        "providers": sess.get_providers(),
     }
 
-
 @app.post("/infer")
-def infer(req: InferRequest):
-    """Инференс по base64-изображению (PNG/JPEG)."""
+async def infer(req: InferRequest):
     img_bytes = base64.b64decode(req.image_base64)
-    img = Image.open(io.BytesIO(img_bytes)).convert("RGB").resize((448, 448))
-    tensor = np.array(img, dtype=np.float32).transpose(2, 0, 1)[None] / 255.0
+    pil_img   = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+    img_bgr   = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
+    nchw      = to_nchw(img_bgr)
 
-    outputs = session.run([OUTPUT_NAME], {INPUT_NAME: tensor})
-    boxes, confs, class_ids = _parse(outputs[0], conf_thr=0.15)
-    keep = _nms(boxes, confs)
+    async with _sem:
+        loop   = asyncio.get_event_loop()
+        output = await loop.run_in_executor(None, _run_sess, nchw)
 
-    count = len(keep)
-    result_boxes = []
-    for i in keep:
-        x1, y1, x2, y2 = _cxcywh_to_xyxy(boxes[i])
-        result_boxes.append({"x1": float(x1), "y1": float(y1),
-                              "x2": float(x2), "y2": float(y2),
-                              "conf": float(confs[i])})
-    return {"eosinophil_count": count, "boxes": result_boxes}
-
+    dets   = run_nms(output)
+    count  = len(dets)
+    boxes  = [
+        {"x1": d["x1"], "y1": d["y1"], "x2": d["x2"], "y2": d["y2"], "conf": d["conf"]}
+        for d in dets
+    ]
+    return {"eosinophil_count": count, "boxes": boxes}
 
 @app.post("/infer_raw")
-def infer_raw(req: TensorRequest):
-    """Инференс по float32 NCHW тензору из Java."""
+async def infer_raw(req: TensorRequest):
+    # Java шлёт NCHW float32 little-endian (1,3,448,448)
     raw    = base64.b64decode(req.tensor_base64)
-    tensor = np.frombuffer(raw, dtype=np.float32).reshape(1, 3, 448, 448)
+    nchw   = np.frombuffer(raw, dtype=np.float32).reshape(1, 3, INPUT_SIZE, INPUT_SIZE).copy()
 
-    outputs = session.run([OUTPUT_NAME], {INPUT_NAME: tensor})
-    boxes, confs, class_ids = _parse(outputs[0], conf_thr=0.15)
-    keep = _nms(boxes, confs, iou_thr=0.5)
+    async with _sem:
+        loop   = asyncio.get_event_loop()
+        output = await loop.run_in_executor(None, _run_sess, nchw)
 
+    dets = run_nms(output)
+
+    # Overlap zone фильтрация
     half_ov = req.overlap_px / 2
-    lo_x = half_ov if not req.edge_left   else 0.0
-    lo_y = half_ov if not req.edge_top    else 0.0
+    lo_x = half_ov               if not req.edge_left   else 0.0
+    lo_y = half_ov               if not req.edge_top    else 0.0
     hi_x = (req.patch_wsi_size - half_ov) if not req.edge_right  else float(req.patch_wsi_size)
     hi_y = (req.patch_wsi_size - half_ov) if not req.edge_bottom else float(req.patch_wsi_size)
 
     eos_count = eosg_count = valid_eos = valid_eosg = 0
 
-    for i in keep:
-        name = CLASS_NAMES.get(int(class_ids[i]), "unknown")
-        x1, y1, x2, y2 = _cxcywh_to_xyxy(boxes[i])
-        cx = (x1 + x2) / 2
-        cy = (y1 + y2) / 2
-
+    for d in dets:
+        name = CLASS_NAMES.get(d["cls_id"], "unknown")
         if name == "eos":    eos_count  += 1
         elif name == "eosg": eosg_count += 1
 
-        if lo_x <= cx <= hi_x and lo_y <= cy <= hi_y:
+        if lo_x <= d["cx"] <= hi_x and lo_y <= d["cy"] <= hi_y:
             if name == "eos":    valid_eos  += 1
             elif name == "eosg": valid_eosg += 1
 
@@ -127,51 +248,3 @@ def infer_raw(req: TensorRequest):
         "valid_eos":        valid_eos,
         "valid_eosg":       valid_eosg,
     }
-
-
-# ── Вспомогательные функции ───────────────────────────────────────────────────
-
-def _parse(output0: np.ndarray, conf_thr: float):
-    """
-    output0: (1, 38, 4116)
-    Колонки: 0-3 = cx,cy,w,h  |  4 = conf_eos  |  5 = conf_eosg  |  6-37 = маски
-    """
-    preds = output0[0].T          # (4116, 38)
-    class_confs = preds[:, 4:6]   # (4116, 2)
-    max_conf    = class_confs.max(axis=1)
-    class_ids   = class_confs.argmax(axis=1)
-
-    mask    = max_conf >= conf_thr
-    return preds[mask, :4], max_conf[mask], class_ids[mask]
-
-
-def _nms(boxes: np.ndarray, scores: np.ndarray, iou_thr: float = 0.45):
-    """NMS → список индексов оставленных детекций."""
-    if len(boxes) == 0:
-        return []
-
-    x1 = boxes[:, 0] - boxes[:, 2] / 2
-    y1 = boxes[:, 1] - boxes[:, 3] / 2
-    x2 = boxes[:, 0] + boxes[:, 2] / 2
-    y2 = boxes[:, 1] + boxes[:, 3] / 2
-    areas  = (x2 - x1) * (y2 - y1)
-    order  = scores.argsort()[::-1]
-    keep   = []
-
-    while order.size > 0:
-        i = order[0]
-        keep.append(i)
-        xx1 = np.maximum(x1[i], x1[order[1:]])
-        yy1 = np.maximum(y1[i], y1[order[1:]])
-        xx2 = np.minimum(x2[i], x2[order[1:]])
-        yy2 = np.minimum(y2[i], y2[order[1:]])
-        inter = np.maximum(0, xx2 - xx1) * np.maximum(0, yy2 - yy1)
-        iou   = inter / (areas[i] + areas[order[1:]] - inter + 1e-6)
-        order = order[1:][iou < iou_thr]
-
-    return keep
-
-
-def _cxcywh_to_xyxy(box):
-    cx, cy, w, h = box
-    return cx - w/2, cy - h/2, cx + w/2, cy + h/2

@@ -62,7 +62,7 @@ public class InferenceWorker {
         this.reportService      = reportService;
     }
 
-    @RabbitListener(queues = "patches.inference", concurrency = "4")
+    @RabbitListener(queues = "patches.inference", concurrency = "16")
     public void handle(PatchInferenceEvent event) {
         log.info("Inference start: job={} patch={}", event.jobId(), event.patchId());
         Path tmp = null;
