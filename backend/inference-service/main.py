@@ -254,3 +254,55 @@ async def infer_batch(req: BatchTensorRequest):
         loop    = asyncio.get_event_loop()
         results = await loop.run_in_executor(None, _run_batch, req.patches)
     return {"results": results}
+
+class BatchItem(BaseModel):
+    patch_id:       str
+    tensor_base64:  str
+    patch_wsi_size: int  = 448
+    overlap_px:     int  = 24
+    edge_left:      bool = False
+    edge_top:       bool = False
+    edge_right:     bool = False
+    edge_bottom:    bool = False
+
+class BatchRequest(BaseModel):
+    patches: list[BatchItem]
+
+@app.post("/infer_batch")
+def infer_batch(req: BatchRequest):
+    results = []
+    for item in req.patches:
+        raw    = base64.b64decode(item.tensor_base64)
+        tensor = np.frombuffer(raw, dtype=np.float32).reshape(1, 3, 448, 448)
+        img    = (tensor[0].transpose(1, 2, 0) * 255).clip(0, 255).astype(np.uint8)
+
+        r = model.predict(img, device=DEVICE, verbose=False,
+                          imgsz=448, conf=0.15, iou=0.5,
+                          save=False, save_txt=False)
+
+        half_ov = item.overlap_px / 2
+        lo_x = half_ov if not item.edge_left   else 0.0
+        lo_y = half_ov if not item.edge_top    else 0.0
+        hi_x = (item.patch_wsi_size - half_ov) if not item.edge_right  else float(item.patch_wsi_size)
+        hi_y = (item.patch_wsi_size - half_ov) if not item.edge_bottom else float(item.patch_wsi_size)
+
+        valid_eos = valid_eosg = total = 0
+        if r[0].boxes is not None:
+            for i, cls_id in enumerate(r[0].boxes.cls.cpu().numpy()):
+                name = model.names[int(cls_id)]
+                x1, y1, x2, y2 = r[0].boxes.xyxy[i].tolist()
+                cx, cy = (x1+x2)/2, (y1+y2)/2
+                total += 1
+                if lo_x <= cx <= hi_x and lo_y <= cy <= hi_y:
+                    if name == "eos":    valid_eos  += 1
+                    elif name == "eosg": valid_eosg += 1
+
+        results.append({
+            "patch_id":    item.patch_id,
+            "total_count": total,
+            "valid_count": valid_eos + valid_eosg,
+            "valid_eos":   valid_eos,
+            "valid_eosg":  valid_eosg,
+        })
+
+    return {"results": results}

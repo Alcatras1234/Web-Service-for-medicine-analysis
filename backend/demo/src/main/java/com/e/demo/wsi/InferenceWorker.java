@@ -29,28 +29,31 @@ import java.util.concurrent.atomic.AtomicBoolean;
 @Slf4j
 public class InferenceWorker {
 
+    // ── Константы патча ───────────────────────────────────────────────────────
     private static final int PATCH_WSI_SIZE = 448;
     private static final int PATCH_STRIDE   = 424;
     private static final int OVERLAP_PX     = PATCH_WSI_SIZE - PATCH_STRIDE; // 24
     private static final int MODEL_SIZE     = 448;
-    private static final int BATCH_SIZE     = 8;
-    private static final int DRAIN_MS       = 50;
+    private static final int BATCH_SIZE     = 8;   // патчей на один GPU-прогон
+    private static final int DRAIN_MS       = 50;  // дренаж каждые 50 мс
 
+    // ── Параметры скользящего окна HPF ────────────────────────────────────────
     private static final int HPF_WINDOW_PX = 2144;
     private static final int HPF_STEP_PX   = 500;
 
-    private final MinioClient          minioClient;
-    private final PatchTaskRepository  patchTaskRepository;
-    private final JobRepository        jobRepository;
-    private final InferenceHttpClient  inferenceClient;
-    private final ReportService        reportService;
+    private final MinioClient         minioClient;
+    private final PatchTaskRepository patchTaskRepository;
+    private final JobRepository       jobRepository;
+    private final InferenceHttpClient inferenceClient;
+    private final ReportService       reportService;
 
     @Value("${minio.bucketName}")
     private String bucket;
 
-    // LinkedBlockingQueue гарантирует отсутствие race condition
+    // ── Батч-буфер ────────────────────────────────────────────────────────────
     private final LinkedBlockingQueue<PatchInferenceEvent> pendingBatch =
             new LinkedBlockingQueue<>();
+    private final AtomicBoolean draining = new AtomicBoolean(false);
 
     public InferenceWorker(
             @Qualifier("internalClient") MinioClient minioClient,
@@ -65,7 +68,7 @@ public class InferenceWorker {
         this.reportService       = reportService;
     }
 
-    // ── Listener: накапливает патчи, дренирует при BATCH_SIZE ────────────────
+    // ── Listener: кладёт в очередь, дренирует при BATCH_SIZE ─────────────────
     @RabbitListener(queues = "patches.inference", concurrency = "4")
     public void handle(PatchInferenceEvent event) {
         pendingBatch.offer(event);
@@ -74,7 +77,7 @@ public class InferenceWorker {
         }
     }
 
-    // ── Scheduled дренаж — сбрасывает неполный батч каждые 50 мс ────────────
+    // ── Scheduled: сбрасывает неполный батч каждые DRAIN_MS мс ───────────────
     @Scheduled(fixedDelay = DRAIN_MS)
     public void scheduledDrain() {
         if (!pendingBatch.isEmpty()) {
@@ -82,28 +85,31 @@ public class InferenceWorker {
         }
     }
 
-    // ── drainTo — атомарно забирает ≤ BATCH_SIZE патчей, без дублей ──────────
-    private final AtomicBoolean draining = new AtomicBoolean(false);
+    // ── drainBatch: забирает ≤ BATCH_SIZE патчей, один HTTP-запрос на GPU ─────
     private void drainBatch() {
-        if (!draining.compareAndSet(false, true)) {
-            return;
-        }
+        if (!draining.compareAndSet(false, true)) return;
         try {
             List<PatchInferenceEvent> batch = new ArrayList<>(BATCH_SIZE);
             pendingBatch.drainTo(batch, BATCH_SIZE);
             if (batch.isEmpty()) return;
 
-            log.info("Draining batch of {} patches", batch.size());
-            Set<UUID> jobsToCheck = new LinkedHashSet<>();
+            log.info("Processing batch of {} patches", batch.size());
+
+            // ── Шаг 1: скачиваем патчи и собираем BatchPatchRequest ──────────
+            List<InferenceHttpClient.BatchPatchRequest> requests = new ArrayList<>();
+            Map<UUID, Path> tmpFiles = new LinkedHashMap<>();
 
             for (PatchInferenceEvent event : batch) {
-                Path tmp = null;
                 try {
-                    tmp = Files.createTempFile("patch-", ".png");
+                    Path tmp = Files.createTempFile("patch-", ".png");
+                    tmpFiles.put(event.patchId(), tmp);
                     downloadToFile(event.s3Path(), tmp);
-                    BufferedImage img = ImageIO.read(tmp.toFile());
 
-                    PatchTask task = patchTaskRepository.findById(event.patchId()).orElseThrow();
+                    BufferedImage img = ImageIO.read(tmp.toFile());
+                    float[] tensor = toFloat32CHW(img, MODEL_SIZE, MODEL_SIZE);
+
+                    PatchTask task = patchTaskRepository.findById(event.patchId())
+                            .orElseThrow();
                     int patchX = task.getX();
                     int patchY = task.getY();
 
@@ -114,32 +120,56 @@ public class InferenceWorker {
                     boolean edgeBottom = !patchTaskRepository
                             .existsByJobIdAndXAndY(event.jobId(), patchX, patchY + PATCH_STRIDE);
 
-                    float[] tensor = toFloat32CHW(img, MODEL_SIZE, MODEL_SIZE);
-
-                    InferenceHttpClient.InferResult result = inferenceClient.infer(
-                            tensor, PATCH_WSI_SIZE, OVERLAP_PX,
-                            edgeLeft, edgeTop, edgeRight, edgeBottom);
-
-                    log.info("Patch {} offset=({},{}) → total={} valid={}",
-                            event.patchId(), patchX, patchY,
-                            result.totalCount(), result.validCount());
-
-                    savePatchResult(event.patchId(), "DONE",
-                            result.validCount(), result.totalCount());
+                    requests.add(new InferenceHttpClient.BatchPatchRequest(
+                            event.patchId(), tensor,
+                            PATCH_WSI_SIZE, OVERLAP_PX,
+                            edgeLeft, edgeTop, edgeRight, edgeBottom
+                    ));
 
                 } catch (Exception e) {
-                    log.error("Inference failed: patch={}", event.patchId(), e);
+                    log.error("Failed to prepare patch={}", event.patchId(), e);
                     savePatchResult(event.patchId(), "FAILED", 0, 0);
-                } finally {
-                    if (tmp != null) try { Files.deleteIfExists(tmp); } catch (IOException ignored) {}
                 }
-
-                jobsToCheck.add(event.jobId());
             }
 
-            for (UUID jobId : jobsToCheck) {
-                checkAndFinalizeJob(jobId);
+            // ── Шаг 2: один батчевый запрос к Python (один GPU-прогон) ───────
+            if (!requests.isEmpty()) {
+                try {
+                    List<Map.Entry<UUID, InferenceHttpClient.InferResult>> results =
+                            inferenceClient.inferBatch(requests);
+
+                    for (Map.Entry<UUID, InferenceHttpClient.InferResult> entry : results) {
+                        UUID patchId = entry.getKey();
+                        InferenceHttpClient.InferResult r = entry.getValue();
+
+                        // Получаем координаты для лога
+                        patchTaskRepository.findById(patchId).ifPresent(task ->
+                                log.info("Patch {} offset=({},{}) → total={} valid={}",
+                                        patchId, task.getX(), task.getY(),
+                                        r.totalCount(), r.validCount())
+                        );
+
+                        savePatchResult(patchId, "DONE", r.validCount(), r.totalCount());
+                    }
+
+                } catch (Exception e) {
+                    log.error("Batch inference failed for {} patches", requests.size(), e);
+                    // Помечаем все патчи батча как FAILED
+                    requests.forEach(r ->
+                            savePatchResult(r.patchId(), "FAILED", 0, 0));
+                }
             }
+
+            // ── Шаг 3: удаляем временные файлы ───────────────────────────────
+            tmpFiles.values().forEach(tmp -> {
+                try { Files.deleteIfExists(tmp); } catch (IOException ignored) {}
+            });
+
+            // ── Шаг 4: проверяем финализацию джобов ──────────────────────────
+            Set<UUID> jobsToCheck = new LinkedHashSet<>();
+            batch.forEach(e -> jobsToCheck.add(e.jobId()));
+            jobsToCheck.forEach(this::checkAndFinalizeJob);
+
         } finally {
             draining.set(false);
         }
