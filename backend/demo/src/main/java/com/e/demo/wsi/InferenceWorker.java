@@ -11,6 +11,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.amqp.rabbit.annotation.RabbitListener;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
 import javax.imageio.ImageIO;
@@ -21,93 +22,127 @@ import java.nio.file.*;
 import java.time.Instant;
 import java.util.*;
 import java.util.List;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 @Component
 @Slf4j
 public class InferenceWorker {
 
-    // ── Константы патча ──────────────────────────────────────────────────────
-    /** Реальный размер патча в WSI-пикселях (что нарезается из слайда) */
     private static final int PATCH_WSI_SIZE = 448;
-    /** Шаг нарезки. Нахлёст = PATCH_WSI_SIZE - PATCH_STRIDE = 64 px */
     private static final int PATCH_STRIDE   = 424;
-    /** Нахлёст в WSI-пикселях */
-    private static final int OVERLAP_PX     = PATCH_WSI_SIZE - PATCH_STRIDE; // 64
-    /** Размер входа модели */
+    private static final int OVERLAP_PX     = PATCH_WSI_SIZE - PATCH_STRIDE; // 24
     private static final int MODEL_SIZE     = 448;
+    private static final int BATCH_SIZE     = 8;
+    private static final int DRAIN_MS       = 50;
 
-    // ── Параметры скользящего окна ПЗБУ (0.3 мм² при ×40, 0.25 мкм/px) ─────
-    private static final int HPF_WINDOW_PX  = 2144;
-    private static final int HPF_STEP_PX    = 500;
+    private static final int HPF_WINDOW_PX = 2144;
+    private static final int HPF_STEP_PX   = 500;
 
-    private final MinioClient         minioClient;
-    private final PatchTaskRepository patchTaskRepository;
-    private final JobRepository       jobRepository;
-    private final InferenceHttpClient inferenceClient;
-    private final ReportService       reportService;
+    private final MinioClient          minioClient;
+    private final PatchTaskRepository  patchTaskRepository;
+    private final JobRepository        jobRepository;
+    private final InferenceHttpClient  inferenceClient;
+    private final ReportService        reportService;
 
     @Value("${minio.bucketName}")
     private String bucket;
+
+    // LinkedBlockingQueue гарантирует отсутствие race condition
+    private final LinkedBlockingQueue<PatchInferenceEvent> pendingBatch =
+            new LinkedBlockingQueue<>();
 
     public InferenceWorker(
             @Qualifier("internalClient") MinioClient minioClient,
             PatchTaskRepository patchTaskRepository,
             JobRepository jobRepository,
-            InferenceHttpClient inferenceHttpClientClient,
+            InferenceHttpClient inferenceClient,
             ReportService reportService) {
-        this.minioClient        = minioClient;
+        this.minioClient         = minioClient;
         this.patchTaskRepository = patchTaskRepository;
-        this.jobRepository      = jobRepository;
-        this.inferenceClient    = inferenceHttpClientClient;
-        this.reportService      = reportService;
+        this.jobRepository       = jobRepository;
+        this.inferenceClient     = inferenceClient;
+        this.reportService       = reportService;
     }
 
-    @RabbitListener(queues = "patches.inference", concurrency = "16")
+    // ── Listener: накапливает патчи, дренирует при BATCH_SIZE ────────────────
+    @RabbitListener(queues = "patches.inference", concurrency = "4")
     public void handle(PatchInferenceEvent event) {
-        log.info("Inference start: job={} patch={}", event.jobId(), event.patchId());
-        Path tmp = null;
-        try {
-            tmp = Files.createTempFile("patch-", ".png");
-            downloadToFile(event.s3Path(), tmp);
-            BufferedImage img = ImageIO.read(tmp.toFile());
-
-            // Берём координаты патча из БД
-            PatchTask task = patchTaskRepository.findById(event.patchId()).orElseThrow();
-            int patchX = task.getX();
-            int patchY = task.getY();
-
-            // Определяем крайние патчи (левый/верхний — тривиально)
-            boolean edgeLeft = patchX == 0;
-            boolean edgeTop  = patchY == 0;
-
-            // Правый/нижний: нет соседнего патча в этом джобе со сдвигом на STRIDE
-            boolean edgeRight  = !patchTaskRepository
-                    .existsByJobIdAndXAndY(event.jobId(), patchX + PATCH_STRIDE, patchY);
-            boolean edgeBottom = !patchTaskRepository
-                    .existsByJobIdAndXAndY(event.jobId(), patchX, patchY + PATCH_STRIDE);
-
-            // Ресайз 512→448 для модели
-            float[] tensor = toFloat32CHW(img, MODEL_SIZE, MODEL_SIZE);
-
-            InferenceHttpClient.InferResult result = inferenceClient.infer(
-                    tensor, PATCH_WSI_SIZE, OVERLAP_PX,
-                    edgeLeft, edgeTop, edgeRight, edgeBottom);
-
-            log.info("Patch {} offset=({},{}) → total={} valid={}",
-                    event.patchId(), patchX, patchY,
-                    result.totalCount(), result.validCount());
-
-            // eosinophilCount = valid_count (без двойного счёта по нахлёсту)
-            savePatchResult(event.patchId(), "DONE", result.validCount(), result.totalCount());
-
-        } catch (Exception e) {
-            log.error("Inference failed: patch={}", event.patchId(), e);
-            savePatchResult(event.patchId(), "FAILED", 0, 0);
-        } finally {
-            if (tmp != null) try { Files.deleteIfExists(tmp); } catch (IOException ignored) {}
+        pendingBatch.offer(event);
+        if (pendingBatch.size() >= BATCH_SIZE) {
+            drainBatch();
         }
+    }
 
-        checkAndFinalizeJob(event.jobId());
+    // ── Scheduled дренаж — сбрасывает неполный батч каждые 50 мс ────────────
+    @Scheduled(fixedDelay = DRAIN_MS)
+    public void scheduledDrain() {
+        if (!pendingBatch.isEmpty()) {
+            drainBatch();
+        }
+    }
+
+    // ── drainTo — атомарно забирает ≤ BATCH_SIZE патчей, без дублей ──────────
+    private final AtomicBoolean draining = new AtomicBoolean(false);
+    private void drainBatch() {
+        if (!draining.compareAndSet(false, true)) {
+            return;
+        }
+        try {
+            List<PatchInferenceEvent> batch = new ArrayList<>(BATCH_SIZE);
+            pendingBatch.drainTo(batch, BATCH_SIZE);
+            if (batch.isEmpty()) return;
+
+            log.info("Draining batch of {} patches", batch.size());
+            Set<UUID> jobsToCheck = new LinkedHashSet<>();
+
+            for (PatchInferenceEvent event : batch) {
+                Path tmp = null;
+                try {
+                    tmp = Files.createTempFile("patch-", ".png");
+                    downloadToFile(event.s3Path(), tmp);
+                    BufferedImage img = ImageIO.read(tmp.toFile());
+
+                    PatchTask task = patchTaskRepository.findById(event.patchId()).orElseThrow();
+                    int patchX = task.getX();
+                    int patchY = task.getY();
+
+                    boolean edgeLeft   = patchX == 0;
+                    boolean edgeTop    = patchY == 0;
+                    boolean edgeRight  = !patchTaskRepository
+                            .existsByJobIdAndXAndY(event.jobId(), patchX + PATCH_STRIDE, patchY);
+                    boolean edgeBottom = !patchTaskRepository
+                            .existsByJobIdAndXAndY(event.jobId(), patchX, patchY + PATCH_STRIDE);
+
+                    float[] tensor = toFloat32CHW(img, MODEL_SIZE, MODEL_SIZE);
+
+                    InferenceHttpClient.InferResult result = inferenceClient.infer(
+                            tensor, PATCH_WSI_SIZE, OVERLAP_PX,
+                            edgeLeft, edgeTop, edgeRight, edgeBottom);
+
+                    log.info("Patch {} offset=({},{}) → total={} valid={}",
+                            event.patchId(), patchX, patchY,
+                            result.totalCount(), result.validCount());
+
+                    savePatchResult(event.patchId(), "DONE",
+                            result.validCount(), result.totalCount());
+
+                } catch (Exception e) {
+                    log.error("Inference failed: patch={}", event.patchId(), e);
+                    savePatchResult(event.patchId(), "FAILED", 0, 0);
+                } finally {
+                    if (tmp != null) try { Files.deleteIfExists(tmp); } catch (IOException ignored) {}
+                }
+
+                jobsToCheck.add(event.jobId());
+            }
+
+            for (UUID jobId : jobsToCheck) {
+                checkAndFinalizeJob(jobId);
+            }
+        } finally {
+            draining.set(false);
+        }
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -116,8 +151,8 @@ public class InferenceWorker {
                                  int validCount, int totalCount) {
         patchTaskRepository.findById(patchId).ifPresent(task -> {
             task.setStatus(status);
-            task.setEosinophilCount(validCount);  // используется в sliding window
-            task.setTotalCount(totalCount);        // raw — для отчёта
+            task.setEosinophilCount(validCount);
+            task.setTotalCount(totalCount);
             task.setUpdatedAt(Instant.now());
             patchTaskRepository.save(task);
         });
@@ -135,20 +170,12 @@ public class InferenceWorker {
         long pending = patchTaskRepository.countByJobIdAndStatus(jobId, "PENDING");
         if (pending != 0) return;
 
-        // Суммарный valid_count по всем патчам (без двойного счёта нахлёста)
-        int totalCount = patchTaskRepository.sumEosinophilCountByJobId(jobId);
-        long failed    = patchTaskRepository.countByJobIdAndStatus(jobId, "FAILED");
+        int  totalCount = patchTaskRepository.sumEosinophilCountByJobId(jobId);
+        long failed     = patchTaskRepository.countByJobIdAndStatus(jobId, "FAILED");
 
-        log.info("Job {} — total valid eosinophils: {}", jobId, totalCount);
-
-        // ── Sliding window для поиска пиковой области ПЗБУ ───────────────────
-        // valid_count в каждом патче уже исключает дубли из нахлёста,
-        // поэтому просто суммируем патчи, перекрывающиеся с окном.
         List<PatchTask> done = patchTaskRepository.findByJobIdAndStatus(jobId, "DONE");
 
-        int maxHpfCount = 0;
-        int maxHpfX     = 0;
-        int maxHpfY     = 0;
+        int maxHpfCount = 0, maxHpfX = 0, maxHpfY = 0;
 
         if (!done.isEmpty()) {
             int maxWSI_X = done.stream()
@@ -160,7 +187,6 @@ public class InferenceWorker {
                 for (int wx = 0; wx < maxWSI_X; wx += HPF_STEP_PX) {
                     int wx2 = wx + HPF_WINDOW_PX;
                     int wy2 = wy + HPF_WINDOW_PX;
-
                     int windowCount = 0;
                     for (PatchTask p : done) {
                         int px2 = p.getX() + PATCH_WSI_SIZE;
@@ -170,7 +196,6 @@ public class InferenceWorker {
                             windowCount += p.getEosinophilCount();
                         }
                     }
-
                     if (windowCount > maxHpfCount) {
                         maxHpfCount = windowCount;
                         maxHpfX     = wx;
@@ -180,17 +205,13 @@ public class InferenceWorker {
             }
         }
 
-        log.info("Job {} — peak ПЗБУ: count={} at ({},{})",
-                jobId, maxHpfCount, maxHpfX, maxHpfY);
-
         String diagnosis = maxHpfCount >= 15 ? "POSITIVE" : "NEGATIVE";
         String status    = failed > 0 ? "DONE_WITH_ERRORS" : "DONE";
 
         jobRepository.updateInferenceResult(
                 jobId, status, totalCount,
                 maxHpfCount, maxHpfX, maxHpfY,
-                diagnosis, Instant.now()
-        );
+                diagnosis, Instant.now());
 
         log.info("Job {} DONE — total={} peakHPF={} @ ({},{}) diagnosis={}",
                 jobId, totalCount, maxHpfCount, maxHpfX, maxHpfY, diagnosis);
@@ -207,10 +228,6 @@ public class InferenceWorker {
         }
     }
 
-    /**
-     * Ресайзит BufferedImage до targetW×targetH и возвращает float32 NCHW тензор.
-     * Работает для любого входного размера (512×512 → 448×448).
-     */
     private float[] toFloat32CHW(BufferedImage src, int targetW, int targetH) {
         BufferedImage img = src;
         if (src.getWidth() != targetW || src.getHeight() != targetH) {
@@ -221,7 +238,6 @@ public class InferenceWorker {
             g2d.drawImage(src, 0, 0, targetW, targetH, null);
             g2d.dispose();
         }
-
         float[] data = new float[3 * targetW * targetH];
         for (int y = 0; y < targetH; y++) {
             for (int x = 0; x < targetW; x++) {

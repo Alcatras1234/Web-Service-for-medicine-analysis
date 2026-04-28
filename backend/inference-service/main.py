@@ -4,7 +4,7 @@ import io
 import logging
 import os
 import shutil
-import struct
+from typing import List
 
 import cv2
 import numpy as np
@@ -12,8 +12,6 @@ import onnxruntime as ort
 from fastapi import FastAPI
 from PIL import Image
 from pydantic import BaseModel
-
-import os
 
 # ── Auto-fix cuDNN/cuBLAS PATH на Windows ────────────────────────────────────
 _site = os.path.join(os.path.dirname(os.path.abspath(__file__)),
@@ -29,66 +27,44 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(levelname)s  %(me
 logger = logging.getLogger(__name__)
 
 # ── Config ────────────────────────────────────────────────────────────────────
-MODEL_PATH  = os.environ.get("MODEL_PATH", "./triton-models/eosin_yolo/1/best.onnx")
+MODEL_PATH  = os.environ.get("MODEL_PATH",  "./triton-models/eosin_yolo/1/best.onnx")
 CONF_THRESH = float(os.environ.get("CONF_THRESH", "0.15"))
 IOU_THRESH  = float(os.environ.get("IOU_THRESH",  "0.5"))
 INPUT_SIZE  = int(os.environ.get("INPUT_SIZE",    "448"))
-CONCURRENCY = int(os.environ.get("CONCURRENCY",   "8"))
+CONCURRENCY = int(os.environ.get("CONCURRENCY",   "1"))   # 1 — GPU делает 1 батч за раз
+BATCH_SIZE  = int(os.environ.get("BATCH_SIZE",    "8"))   # патчей в одном GPU-прогоне
 
-# ── ONNX Runtime + Tensor Cores ───────────────────────────────────────────────
-# TensorRT EP использует Tensor Cores автоматически (FP16/INT8)
-# CUDAExecutionProvider тоже задействует их через cuDNN
-
+# ── ONNX Runtime ──────────────────────────────────────────────────────────────
 _available = ort.get_available_providers()
 logger.info(f"Available ORT providers: {_available}")
 
-# Пробуем TensorRT → CUDA → CPU (в порядке приоритета)
-if "TensorrtExecutionProvider" in _available:
-    providers = [
-        (
-            "TensorrtExecutionProvider",
-            {
-                "trt_fp16_enable": True,          # FP16 → Tensor Cores
-                "trt_max_workspace_size": 1 << 30, # 1 GB
-            },
-        ),
-        (
-            "CUDAExecutionProvider",
-            {"cudnn_conv_use_max_workspace": "1"},
-        ),
-        "CPUExecutionProvider",
-    ]
-    logger.info("Using TensorRT EP (FP16 Tensor Cores)")
-elif "CUDAExecutionProvider" in _available:
-    providers = [
-        (
-            "CUDAExecutionProvider",
-            {
-                "cudnn_conv_use_max_workspace": "1",
-                "do_copy_in_default_stream": True,
-            },
-        ),
-        "CPUExecutionProvider",
-    ]
-    logger.info("Using CUDA EP")
-else:
-    logger.warning("GPU not available")
+if "CUDAExecutionProvider" not in _available:
+    raise RuntimeError("CUDAExecutionProvider not available. Install onnxruntime-gpu + cuDNN.")
+
+providers = [
+    (
+        "CUDAExecutionProvider",
+        {
+            "cudnn_conv_use_max_workspace": "1",
+            "do_copy_in_default_stream":    True,
+        },
+    ),
+]
+logger.info("Using CUDA EP only (GPU, no CPU fallback)")
 
 sess_opts = ort.SessionOptions()
 sess_opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-sess_opts.intra_op_num_threads = 4
+sess_opts.intra_op_num_threads      = 1
+sess_opts.execution_mode            = ort.ExecutionMode.ORT_SEQUENTIAL
 
 sess        = ort.InferenceSession(MODEL_PATH, sess_options=sess_opts, providers=providers)
 input_name  = sess.get_inputs()[0].name
 output_name = sess.get_outputs()[0].name
 
-# Имена классов — YOLO11 seg ONNX не хранит names, задаём вручную
-# Порядок должен совпадать с тем, как экспортировалась модель
 CLASS_NAMES = {0: "eos", 1: "eosg"}
 
 logger.info(f"Model loaded: {MODEL_PATH}")
 logger.info(f"Active providers: {sess.get_providers()}")
-logger.info(f"Classes: {CLASS_NAMES}")
 
 # ── FastAPI ───────────────────────────────────────────────────────────────────
 app  = FastAPI()
@@ -112,28 +88,32 @@ class TensorRequest(BaseModel):
     edge_right:     bool = False
     edge_bottom:    bool = False
 
-# ── Preprocessing ─────────────────────────────────────────────────────────────
-def to_nchw(img_bgr: np.ndarray) -> np.ndarray:
-    """uint8 HWC BGR → float32 NCHW [0..1] resized to INPUT_SIZE"""
-    resized = cv2.resize(img_bgr, (INPUT_SIZE, INPUT_SIZE))
-    rgb     = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
-    nchw    = rgb.transpose(2, 0, 1).astype(np.float32) / 255.0
-    return nchw[np.newaxis, ...]  # (1, 3, H, W)
+class PatchItem(BaseModel):
+    patch_id:       str
+    tensor_base64:  str
+    patch_wsi_size: int  = 448
+    overlap_px:     int  = 24
+    edge_left:      bool = False
+    edge_top:       bool = False
+    edge_right:     bool = False
+    edge_bottom:    bool = False
+
+class BatchTensorRequest(BaseModel):
+    patches: List[PatchItem]
 
 # ── NMS ───────────────────────────────────────────────────────────────────────
-def run_nms(output: np.ndarray):
+def run_nms(output: np.ndarray) -> list:
     """
-    YOLO11 detect ONNX output shape: (1, num_classes+4, 8400)
-    Returns list of (cls_id, cx, cy, conf)
+    output shape: (1, 84, 8400)  ← один патч
+    84 = 4 bbox + 80 классов
     """
-    preds  = output[0]                          # (C+4, 8400)
-    coords = preds[:4, :].T                     # (8400, 4) xywh
-    scores = preds[4:, :]                       # (num_cls, 8400)
+    preds      = output[0]                       # (84, 8400)
+    coords     = preds[:4, :].T                  # (8400, 4) xywh
+    scores     = preds[4:, :]                    # (num_cls, 8400)
+    cls_ids    = scores.argmax(axis=0)           # (8400,)
+    cls_scores = scores.max(axis=0)              # (8400,)
 
-    cls_ids     = scores.argmax(axis=0)         # (8400,)
-    cls_scores  = scores.max(axis=0)            # (8400,)
-
-    mask   = cls_scores > CONF_THRESH
+    mask    = cls_scores > CONF_THRESH
     coords  = coords[mask]
     cls_ids = cls_ids[mask]
     confs   = cls_scores[mask]
@@ -147,40 +127,84 @@ def run_nms(output: np.ndarray):
     y2 = coords[:, 1] + coords[:, 3] / 2
     xyxy = np.stack([x1, y1, x2, y2], axis=1).astype(np.float32)
 
-    indices = cv2.dnn.NMSBoxes(
-        xyxy.tolist(), confs.tolist(), CONF_THRESH, IOU_THRESH
-    )
+    indices = cv2.dnn.NMSBoxes(xyxy.tolist(), confs.tolist(), CONF_THRESH, IOU_THRESH)
     if len(indices) == 0:
         return []
 
-    detections = []
-    for i in indices:
-        idx = int(i)
-        cx  = float((x1[idx] + x2[idx]) / 2)
-        cy  = float((y1[idx] + y2[idx]) / 2)
-        detections.append({
-            "cls_id": int(cls_ids[idx]),
-            "cx":     cx,
-            "cy":     cy,
-            "x1":     float(x1[idx]),
-            "y1":     float(y1[idx]),
-            "x2":     float(x2[idx]),
-            "y2":     float(y2[idx]),
-            "conf":   float(confs[idx]),
-        })
-    return detections
+    return [
+        {
+            "cls_id": int(cls_ids[int(i)]),
+            "cx":     float((x1[int(i)] + x2[int(i)]) / 2),
+            "cy":     float((y1[int(i)] + y2[int(i)]) / 2),
+            "x1":     float(x1[int(i)]),  "y1": float(y1[int(i)]),
+            "x2":     float(x2[int(i)]),  "y2": float(y2[int(i)]),
+            "conf":   float(confs[int(i)]),
+        }
+        for i in indices
+    ]
 
-# ── Raw inference ─────────────────────────────────────────────────────────────
-def _run_sess(nchw: np.ndarray) -> np.ndarray:
+# ── Overlap zone фильтрация ───────────────────────────────────────────────────
+def apply_overlap_filter(dets: list, meta: PatchItem) -> dict:
+    half_ov = meta.overlap_px / 2
+    lo_x = half_ov                         if not meta.edge_left   else 0.0
+    lo_y = half_ov                         if not meta.edge_top    else 0.0
+    hi_x = (meta.patch_wsi_size - half_ov) if not meta.edge_right  else float(meta.patch_wsi_size)
+    hi_y = (meta.patch_wsi_size - half_ov) if not meta.edge_bottom else float(meta.patch_wsi_size)
+
+    eos_count = eosg_count = valid_eos = valid_eosg = 0
+    for d in dets:
+        name = CLASS_NAMES.get(d["cls_id"], "unknown")
+        if name == "eos":    eos_count  += 1
+        elif name == "eosg": eosg_count += 1
+        if lo_x <= d["cx"] <= hi_x and lo_y <= d["cy"] <= hi_y:
+            if name == "eos":    valid_eos  += 1
+            elif name == "eosg": valid_eosg += 1
+
+    return {
+        "patch_id":    meta.patch_id,
+        "total_count": eos_count + eosg_count,
+        "valid_count": valid_eos + valid_eosg,
+        "valid_eos":   valid_eos,
+        "valid_eosg":  valid_eosg,
+    }
+
+# ── GPU inference (синхронный, вызывается из executor) ────────────────────────
+def _run_batch(patches: List[PatchItem]) -> list:
+    n = len(patches)
+    batch = np.zeros((n, 3, INPUT_SIZE, INPUT_SIZE), dtype=np.float32)
+
+    for i, p in enumerate(patches):
+        raw  = base64.b64decode(p.tensor_base64)
+        nchw = np.frombuffer(raw, dtype=np.float32).reshape(3, INPUT_SIZE, INPUT_SIZE)
+        batch[i] = nchw
+
+    # Один прогон через GPU для всего батча
+    outputs = sess.run([output_name], {input_name: batch})[0]  # (N, 84, 8400)
+
+    results = []
+    for i, meta in enumerate(patches):
+        dets   = run_nms(outputs[i:i+1])
+        result = apply_overlap_filter(dets, meta)
+        results.append(result)
+        logger.info(
+            f"patch={meta.patch_id} "
+            f"total={result['total_count']} valid={result['valid_count']}"
+        )
+
+    return results
+
+def _run_single(nchw: np.ndarray) -> np.ndarray:
     return sess.run([output_name], {input_name: nchw})[0]
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 @app.get("/health")
 def health():
     return {
-        "status":    "ok",
-        "model":     MODEL_PATH,
-        "providers": sess.get_providers(),
+        "status":      "ok",
+        "model":       MODEL_PATH,
+        "providers":   sess.get_providers(),
+        "batch_size":  BATCH_SIZE,
+        "concurrency": CONCURRENCY,
     }
 
 @app.post("/infer")
@@ -188,63 +212,45 @@ async def infer(req: InferRequest):
     img_bytes = base64.b64decode(req.image_base64)
     pil_img   = Image.open(io.BytesIO(img_bytes)).convert("RGB")
     img_bgr   = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
-    nchw      = to_nchw(img_bgr)
+    resized   = cv2.resize(img_bgr, (INPUT_SIZE, INPUT_SIZE))
+    rgb       = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
+    nchw      = rgb.transpose(2, 0, 1).astype(np.float32)[np.newaxis] / 255.0
 
     async with _sem:
         loop   = asyncio.get_event_loop()
-        output = await loop.run_in_executor(None, _run_sess, nchw)
+        output = await loop.run_in_executor(None, _run_single, nchw)
 
-    dets   = run_nms(output)
-    count  = len(dets)
-    boxes  = [
-        {"x1": d["x1"], "y1": d["y1"], "x2": d["x2"], "y2": d["y2"], "conf": d["conf"]}
-        for d in dets
-    ]
-    return {"eosinophil_count": count, "boxes": boxes}
+    dets  = run_nms(output)
+    boxes = [{"x1": d["x1"], "y1": d["y1"], "x2": d["x2"], "y2": d["y2"], "conf": d["conf"]}
+             for d in dets]
+    return {"eosinophil_count": len(dets), "boxes": boxes}
 
 @app.post("/infer_raw")
 async def infer_raw(req: TensorRequest):
-    # Java шлёт NCHW float32 little-endian (1,3,448,448)
-    raw    = base64.b64decode(req.tensor_base64)
-    nchw   = np.frombuffer(raw, dtype=np.float32).reshape(1, 3, INPUT_SIZE, INPUT_SIZE).copy()
+    """Одиночный патч — для совместимости и тестов."""
+    raw  = base64.b64decode(req.tensor_base64)
+    nchw = np.frombuffer(raw, dtype=np.float32).reshape(1, 3, INPUT_SIZE, INPUT_SIZE).copy()
 
     async with _sem:
         loop   = asyncio.get_event_loop()
-        output = await loop.run_in_executor(None, _run_sess, nchw)
+        output = await loop.run_in_executor(None, _run_single, nchw)
 
-    dets = run_nms(output)
+    # Оборачиваем в PatchItem для единого apply_overlap_filter
+    meta   = PatchItem(patch_id="single", tensor_base64=req.tensor_base64,
+                       patch_wsi_size=req.patch_wsi_size, overlap_px=req.overlap_px,
+                       edge_left=req.edge_left, edge_top=req.edge_top,
+                       edge_right=req.edge_right, edge_bottom=req.edge_bottom)
+    dets   = run_nms(output)
+    result = apply_overlap_filter(dets, meta)
+    return result
 
-    # Overlap zone фильтрация
-    half_ov = req.overlap_px / 2
-    lo_x = half_ov               if not req.edge_left   else 0.0
-    lo_y = half_ov               if not req.edge_top    else 0.0
-    hi_x = (req.patch_wsi_size - half_ov) if not req.edge_right  else float(req.patch_wsi_size)
-    hi_y = (req.patch_wsi_size - half_ov) if not req.edge_bottom else float(req.patch_wsi_size)
-
-    eos_count = eosg_count = valid_eos = valid_eosg = 0
-
-    for d in dets:
-        name = CLASS_NAMES.get(d["cls_id"], "unknown")
-        if name == "eos":    eos_count  += 1
-        elif name == "eosg": eosg_count += 1
-
-        if lo_x <= d["cx"] <= hi_x and lo_y <= d["cy"] <= hi_y:
-            if name == "eos":    valid_eos  += 1
-            elif name == "eosg": valid_eosg += 1
-
-    total_count = eos_count  + eosg_count
-    valid_count = valid_eos  + valid_eosg
-
-    logger.info(
-        f"total=({eos_count}eos+{eosg_count}eosg={total_count}) "
-        f"valid=({valid_eos}eos+{valid_eosg}eosg={valid_count}) "
-        f"zone=({lo_x:.0f}-{hi_x:.0f},{lo_y:.0f}-{hi_y:.0f})"
-    )
-
-    return {
-        "eosinophil_count": valid_count,
-        "total_count":      total_count,
-        "valid_count":      valid_count,
-        "valid_eos":        valid_eos,
-        "valid_eosg":       valid_eosg,
-    }
+@app.post("/infer_batch")
+async def infer_batch(req: BatchTensorRequest):
+    """
+    Батч патчей — один GPU-прогон для N патчей.
+    Java шлёт список патчей, получает список результатов в том же порядке.
+    """
+    async with _sem:
+        loop    = asyncio.get_event_loop()
+        results = await loop.run_in_executor(None, _run_batch, req.patches)
+    return {"results": results}
