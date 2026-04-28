@@ -14,6 +14,7 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
+import javax.annotation.PreDestroy;
 import javax.imageio.ImageIO;
 import java.awt.*;
 import java.awt.image.BufferedImage;
@@ -22,8 +23,10 @@ import java.nio.file.*;
 import java.time.Instant;
 import java.util.*;
 import java.util.List;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.LinkedBlockingQueue;
-import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.TimeUnit;
 
 @Component
 @Slf4j
@@ -34,8 +37,8 @@ public class InferenceWorker {
     private static final int PATCH_STRIDE   = 424;
     private static final int OVERLAP_PX     = PATCH_WSI_SIZE - PATCH_STRIDE; // 24
     private static final int MODEL_SIZE     = 448;
-    private static final int BATCH_SIZE     = 8;   // патчей на один GPU-прогон
-    private static final int DRAIN_MS       = 50;  // дренаж каждые 50 мс
+    private static final int BATCH_SIZE     = 8;
+    private static final int DRAIN_MS       = 50;
 
     // ── Параметры скользящего окна HPF ────────────────────────────────────────
     private static final int HPF_WINDOW_PX = 2144;
@@ -50,10 +53,18 @@ public class InferenceWorker {
     @Value("${minio.bucketName}")
     private String bucket;
 
-    // ── Батч-буфер ────────────────────────────────────────────────────────────
+    // ── Очередь патчей + single-thread executor для дренажа ──────────────────
     private final LinkedBlockingQueue<PatchInferenceEvent> pendingBatch =
             new LinkedBlockingQueue<>();
-    private final AtomicBoolean draining = new AtomicBoolean(false);
+
+    // SingleThreadExecutor гарантирует что drainBatch не запустится параллельно
+    // При этом listener-потоки (concurrency=4) не блокируются
+    private final ExecutorService drainExecutor =
+            Executors.newSingleThreadExecutor(r -> {
+                Thread t = new Thread(r, "batch-drain");
+                t.setDaemon(true);
+                return t;
+            });
 
     public InferenceWorker(
             @Qualifier("internalClient") MinioClient minioClient,
@@ -68,111 +79,118 @@ public class InferenceWorker {
         this.reportService       = reportService;
     }
 
-    // ── Listener: кладёт в очередь, дренирует при BATCH_SIZE ─────────────────
+    // ── Listener: кладёт в очередь, сабмитит дренаж при BATCH_SIZE ───────────
     @RabbitListener(queues = "patches.inference", concurrency = "4")
     public void handle(PatchInferenceEvent event) {
         pendingBatch.offer(event);
         if (pendingBatch.size() >= BATCH_SIZE) {
-            drainBatch();
+            drainExecutor.submit(this::drainBatch);
         }
     }
 
-    // ── Scheduled: сбрасывает неполный батч каждые DRAIN_MS мс ───────────────
+    // ── Scheduled: дренирует неполный батч каждые 50 мс ──────────────────────
     @Scheduled(fixedDelay = DRAIN_MS)
     public void scheduledDrain() {
         if (!pendingBatch.isEmpty()) {
-            drainBatch();
+            drainExecutor.submit(this::drainBatch);
         }
     }
 
-    // ── drainBatch: забирает ≤ BATCH_SIZE патчей, один HTTP-запрос на GPU ─────
-    private void drainBatch() {
-        if (!draining.compareAndSet(false, true)) return;
+    // ── Graceful shutdown ─────────────────────────────────────────────────────
+    @PreDestroy
+    public void shutdown() {
+        log.info("Shutting down drainExecutor...");
+        drainExecutor.shutdown();
         try {
-            List<PatchInferenceEvent> batch = new ArrayList<>(BATCH_SIZE);
-            pendingBatch.drainTo(batch, BATCH_SIZE);
-            if (batch.isEmpty()) return;
-
-            log.info("Processing batch of {} patches", batch.size());
-
-            // ── Шаг 1: скачиваем патчи и собираем BatchPatchRequest ──────────
-            List<InferenceHttpClient.BatchPatchRequest> requests = new ArrayList<>();
-            Map<UUID, Path> tmpFiles = new LinkedHashMap<>();
-
-            for (PatchInferenceEvent event : batch) {
-                try {
-                    Path tmp = Files.createTempFile("patch-", ".png");
-                    tmpFiles.put(event.patchId(), tmp);
-                    downloadToFile(event.s3Path(), tmp);
-
-                    BufferedImage img = ImageIO.read(tmp.toFile());
-                    float[] tensor = toFloat32CHW(img, MODEL_SIZE, MODEL_SIZE);
-
-                    PatchTask task = patchTaskRepository.findById(event.patchId())
-                            .orElseThrow();
-                    int patchX = task.getX();
-                    int patchY = task.getY();
-
-                    boolean edgeLeft   = patchX == 0;
-                    boolean edgeTop    = patchY == 0;
-                    boolean edgeRight  = !patchTaskRepository
-                            .existsByJobIdAndXAndY(event.jobId(), patchX + PATCH_STRIDE, patchY);
-                    boolean edgeBottom = !patchTaskRepository
-                            .existsByJobIdAndXAndY(event.jobId(), patchX, patchY + PATCH_STRIDE);
-
-                    requests.add(new InferenceHttpClient.BatchPatchRequest(
-                            event.patchId(), tensor,
-                            PATCH_WSI_SIZE, OVERLAP_PX,
-                            edgeLeft, edgeTop, edgeRight, edgeBottom
-                    ));
-
-                } catch (Exception e) {
-                    log.error("Failed to prepare patch={}", event.patchId(), e);
-                    savePatchResult(event.patchId(), "FAILED", 0, 0);
-                }
+            if (!drainExecutor.awaitTermination(10, TimeUnit.SECONDS)) {
+                drainExecutor.shutdownNow();
             }
-
-            // ── Шаг 2: один батчевый запрос к Python (один GPU-прогон) ───────
-            if (!requests.isEmpty()) {
-                try {
-                    List<Map.Entry<UUID, InferenceHttpClient.InferResult>> results =
-                            inferenceClient.inferBatch(requests);
-
-                    for (Map.Entry<UUID, InferenceHttpClient.InferResult> entry : results) {
-                        UUID patchId = entry.getKey();
-                        InferenceHttpClient.InferResult r = entry.getValue();
-
-                        // Получаем координаты для лога
-                        patchTaskRepository.findById(patchId).ifPresent(task ->
-                                log.info("Patch {} offset=({},{}) → total={} valid={}",
-                                        patchId, task.getX(), task.getY(),
-                                        r.totalCount(), r.validCount())
-                        );
-
-                        savePatchResult(patchId, "DONE", r.validCount(), r.totalCount());
-                    }
-
-                } catch (Exception e) {
-                    log.error("Batch inference failed for {} patches", requests.size(), e);
-                    // Помечаем все патчи батча как FAILED
-                    requests.forEach(r ->
-                            savePatchResult(r.patchId(), "FAILED", 0, 0));
-                }
-            }
-
-            // ── Шаг 3: удаляем временные файлы ───────────────────────────────
-            tmpFiles.values().forEach(tmp -> {
-                try { Files.deleteIfExists(tmp); } catch (IOException ignored) {}
-            });
-
-            // ── Шаг 4: проверяем финализацию джобов ──────────────────────────
-            Set<UUID> jobsToCheck = new LinkedHashSet<>();
-            batch.forEach(e -> jobsToCheck.add(e.jobId()));
-            jobsToCheck.forEach(this::checkAndFinalizeJob);
-
-        } finally {
-            draining.set(false);
+        } catch (InterruptedException e) {
+            drainExecutor.shutdownNow();
+            Thread.currentThread().interrupt();
         }
+    }
+
+    // ── drainBatch: один HTTP-запрос на ≤ BATCH_SIZE патчей ──────────────────
+    private void drainBatch() {
+        List<PatchInferenceEvent> batch = new ArrayList<>(BATCH_SIZE);
+        pendingBatch.drainTo(batch, BATCH_SIZE);
+        if (batch.isEmpty()) return;
+
+        log.info("Processing batch of {} patches", batch.size());
+
+        // Шаг 1: скачиваем патчи и собираем BatchPatchRequest
+        List<InferenceHttpClient.BatchPatchRequest> requests = new ArrayList<>();
+        Map<UUID, Path>               tmpFiles = new LinkedHashMap<>();
+        Map<UUID, PatchInferenceEvent> eventMap = new LinkedHashMap<>();
+
+        for (PatchInferenceEvent event : batch) {
+            try {
+                Path tmp = Files.createTempFile("patch-", ".png");
+                tmpFiles.put(event.patchId(), tmp);
+                downloadToFile(event.s3Path(), tmp);
+
+                BufferedImage img = ImageIO.read(tmp.toFile());
+                float[] tensor = toFloat32CHW(img, MODEL_SIZE, MODEL_SIZE);
+
+                PatchTask task = patchTaskRepository.findById(event.patchId()).orElseThrow();
+                int patchX = task.getX();
+                int patchY = task.getY();
+
+                boolean edgeLeft   = patchX == 0;
+                boolean edgeTop    = patchY == 0;
+                boolean edgeRight  = !patchTaskRepository
+                        .existsByJobIdAndXAndY(event.jobId(), patchX + PATCH_STRIDE, patchY);
+                boolean edgeBottom = !patchTaskRepository
+                        .existsByJobIdAndXAndY(event.jobId(), patchX, patchY + PATCH_STRIDE);
+
+                requests.add(new InferenceHttpClient.BatchPatchRequest(
+                        event.patchId(), tensor,
+                        PATCH_WSI_SIZE, OVERLAP_PX,
+                        edgeLeft, edgeTop, edgeRight, edgeBottom
+                ));
+                eventMap.put(event.patchId(), event);
+
+            } catch (Exception e) {
+                log.error("Failed to prepare patch={}", event.patchId(), e);
+                savePatchResult(event.patchId(), "FAILED", 0, 0);
+                eventMap.put(event.patchId(), event); // jobId всё равно нужен для финализации
+            }
+        }
+
+        // Шаг 2: один батчевый запрос к Python
+        if (!requests.isEmpty()) {
+            try {
+                List<Map.Entry<UUID, InferenceHttpClient.InferResult>> results =
+                        inferenceClient.inferBatch(requests);
+
+                for (Map.Entry<UUID, InferenceHttpClient.InferResult> entry : results) {
+                    UUID patchId = entry.getKey();
+                    InferenceHttpClient.InferResult r = entry.getValue();
+
+                    patchTaskRepository.findById(patchId).ifPresent(task ->
+                            log.info("Patch {} offset=({},{}) → total={} valid={}",
+                                    patchId, task.getX(), task.getY(),
+                                    r.totalCount(), r.validCount())
+                    );
+                    savePatchResult(patchId, "DONE", r.validCount(), r.totalCount());
+                }
+
+            } catch (Exception e) {
+                log.error("Batch inference failed for {} patches", requests.size(), e);
+                requests.forEach(r -> savePatchResult(r.patchId(), "FAILED", 0, 0));
+            }
+        }
+
+        // Шаг 3: удаляем временные файлы
+        tmpFiles.values().forEach(tmp -> {
+            try { Files.deleteIfExists(tmp); } catch (IOException ignored) {}
+        });
+
+        // Шаг 4: проверяем финализацию джобов
+        Set<UUID> jobsToCheck = new LinkedHashSet<>();
+        eventMap.values().forEach(e -> jobsToCheck.add(e.jobId()));
+        jobsToCheck.forEach(this::checkAndFinalizeJob);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
