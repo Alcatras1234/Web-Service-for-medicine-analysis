@@ -7,6 +7,7 @@ import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 import org.springframework.transaction.annotation.Transactional;
 import java.time.Instant;
+import java.util.Optional;
 import java.util.UUID;
 
 public interface JobRepository extends JpaRepository<Job, UUID> {
@@ -71,4 +72,6 @@ public interface JobRepository extends JpaRepository<Job, UUID> {
                     @Param("expectedStatus") String expectedStatus,
                     @Param("newStatus") String newStatus,
                     @Param("now") Instant now);
+
+    Optional<Job> findFirstBySlideIdOrderByCreatedAtDesc(Integer slideId);
 }

@@ -1,26 +1,19 @@
-// app/api/files/get-upload-link/route.ts
+// app/api/reports/[jobId]/status/route.ts
 import { NextRequest, NextResponse } from "next/server"
 import { backendFetch } from "@/lib/backend"
 
-export async function GET(request: NextRequest) {
+export async function GET(
+  request: NextRequest,
+  { params }: { params: Promise<{ jobId: string }> }
+) {
+  const { jobId } = await params
   const token = request.cookies.get("token")?.value
   if (!token) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
   }
 
-  const filename = request.nextUrl.searchParams.get("filename")
-  if (!filename) {
-    return NextResponse.json(
-      { error: "filename required" },
-      { status: 400 }
-    )
-  }
-
   try {
-    const res = await backendFetch(
-      `/api/files/get-upload-link?filename=${encodeURIComponent(filename)}`,
-      { token }
-    )
+    const res = await backendFetch(`/api/reports/${jobId}/status`, { token })
     const text = await res.text()
     return new NextResponse(text, {
       status: res.status,
