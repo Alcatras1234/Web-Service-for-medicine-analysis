@@ -1,0 +1,7 @@
+onnxruntime-gpu==1.17.0
+fastapi
+uvicorn[standard]
+numpy<2
+opencv-python-headless
+pillow
+pydantic

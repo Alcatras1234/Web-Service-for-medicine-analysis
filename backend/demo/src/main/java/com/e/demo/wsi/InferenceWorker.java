@@ -11,7 +11,6 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.amqp.rabbit.annotation.RabbitListener;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
 import javax.annotation.PreDestroy;
@@ -32,33 +31,26 @@ import java.util.concurrent.TimeUnit;
 @Slf4j
 public class InferenceWorker {
 
-    // ── Константы патча ───────────────────────────────────────────────────────
     private static final int PATCH_WSI_SIZE = 448;
     private static final int PATCH_STRIDE   = 424;
-    private static final int OVERLAP_PX     = PATCH_WSI_SIZE - PATCH_STRIDE; // 24
+    private static final int OVERLAP_PX     = PATCH_WSI_SIZE - PATCH_STRIDE;
     private static final int MODEL_SIZE     = 448;
+    private static final int HPF_WINDOW_PX  = 2144;
+    private static final int HPF_STEP_PX    = 500;
     private static final int BATCH_SIZE     = 8;
-    private static final int DRAIN_MS       = 50;
 
-    // ── Параметры скользящего окна HPF ────────────────────────────────────────
-    private static final int HPF_WINDOW_PX = 2144;
-    private static final int HPF_STEP_PX   = 500;
-
-    private final MinioClient         minioClient;
-    private final PatchTaskRepository patchTaskRepository;
-    private final JobRepository       jobRepository;
-    private final InferenceHttpClient inferenceClient;
-    private final ReportService       reportService;
+    private final MinioClient          minioClient;
+    private final PatchTaskRepository  patchTaskRepository;
+    private final JobRepository        jobRepository;
+    private final InferenceHttpClient  inferenceClient;
+    private final ReportService        reportService;
 
     @Value("${minio.bucketName}")
     private String bucket;
 
-    // ── Очередь патчей + single-thread executor для дренажа ──────────────────
     private final LinkedBlockingQueue<PatchInferenceEvent> pendingBatch =
             new LinkedBlockingQueue<>();
 
-    // SingleThreadExecutor гарантирует что drainBatch не запустится параллельно
-    // При этом listener-потоки (concurrency=4) не блокируются
     private final ExecutorService drainExecutor =
             Executors.newSingleThreadExecutor(r -> {
                 Thread t = new Thread(r, "batch-drain");
@@ -79,7 +71,6 @@ public class InferenceWorker {
         this.reportService       = reportService;
     }
 
-    // ── Listener: кладёт в очередь, сабмитит дренаж при BATCH_SIZE ───────────
     @RabbitListener(queues = "patches.inference", concurrency = "4")
     public void handle(PatchInferenceEvent event) {
         pendingBatch.offer(event);
@@ -88,15 +79,6 @@ public class InferenceWorker {
         }
     }
 
-    // ── Scheduled: дренирует неполный батч каждые 50 мс ──────────────────────
-    @Scheduled(fixedDelay = DRAIN_MS)
-    public void scheduledDrain() {
-        if (!pendingBatch.isEmpty()) {
-            drainExecutor.submit(this::drainBatch);
-        }
-    }
-
-    // ── Graceful shutdown ─────────────────────────────────────────────────────
     @PreDestroy
     public void shutdown() {
         log.info("Shutting down drainExecutor...");
@@ -111,7 +93,6 @@ public class InferenceWorker {
         }
     }
 
-    // ── drainBatch: один HTTP-запрос на ≤ BATCH_SIZE патчей ──────────────────
     private void drainBatch() {
         List<PatchInferenceEvent> batch = new ArrayList<>(BATCH_SIZE);
         pendingBatch.drainTo(batch, BATCH_SIZE);
@@ -119,19 +100,12 @@ public class InferenceWorker {
 
         log.info("Processing batch of {} patches", batch.size());
 
-        // Шаг 1: скачиваем патчи и собираем BatchPatchRequest
-        List<InferenceHttpClient.BatchPatchRequest> requests = new ArrayList<>();
-        Map<UUID, Path>               tmpFiles = new LinkedHashMap<>();
-        Map<UUID, PatchInferenceEvent> eventMap = new LinkedHashMap<>();
-
         for (PatchInferenceEvent event : batch) {
+            Path tmp = null;
             try {
-                Path tmp = Files.createTempFile("patch-", ".png");
-                tmpFiles.put(event.patchId(), tmp);
+                tmp = Files.createTempFile("patch-", ".png");
                 downloadToFile(event.s3Path(), tmp);
-
                 BufferedImage img = ImageIO.read(tmp.toFile());
-                float[] tensor = toFloat32CHW(img, MODEL_SIZE, MODEL_SIZE);
 
                 PatchTask task = patchTaskRepository.findById(event.patchId()).orElseThrow();
                 int patchX = task.getX();
@@ -144,56 +118,28 @@ public class InferenceWorker {
                 boolean edgeBottom = !patchTaskRepository
                         .existsByJobIdAndXAndY(event.jobId(), patchX, patchY + PATCH_STRIDE);
 
-                requests.add(new InferenceHttpClient.BatchPatchRequest(
-                        event.patchId(), tensor,
-                        PATCH_WSI_SIZE, OVERLAP_PX,
-                        edgeLeft, edgeTop, edgeRight, edgeBottom
-                ));
-                eventMap.put(event.patchId(), event);
+                float[] tensor = toFloat32CHW(img, MODEL_SIZE, MODEL_SIZE);
+
+                InferenceHttpClient.InferResult result = inferenceClient.infer(
+                        tensor, PATCH_WSI_SIZE, OVERLAP_PX,
+                        edgeLeft, edgeTop, edgeRight, edgeBottom);
+
+                log.info("Patch {} ({},{}) → total={} valid={}",
+                        event.patchId(), patchX, patchY,
+                        result.totalCount(), result.validCount());
+
+                savePatchResult(event.patchId(), "DONE", result.validCount(), result.totalCount());
 
             } catch (Exception e) {
-                log.error("Failed to prepare patch={}", event.patchId(), e);
+                log.error("Inference failed: patch={}", event.patchId(), e);
                 savePatchResult(event.patchId(), "FAILED", 0, 0);
-                eventMap.put(event.patchId(), event); // jobId всё равно нужен для финализации
+            } finally {
+                if (tmp != null) try { Files.deleteIfExists(tmp); } catch (IOException ignored) {}
             }
+
+            checkAndFinalizeJob(event.jobId());
         }
-
-        // Шаг 2: один батчевый запрос к Python
-        if (!requests.isEmpty()) {
-            try {
-                List<Map.Entry<UUID, InferenceHttpClient.InferResult>> results =
-                        inferenceClient.inferBatch(requests);
-
-                for (Map.Entry<UUID, InferenceHttpClient.InferResult> entry : results) {
-                    UUID patchId = entry.getKey();
-                    InferenceHttpClient.InferResult r = entry.getValue();
-
-                    patchTaskRepository.findById(patchId).ifPresent(task ->
-                            log.info("Patch {} offset=({},{}) → total={} valid={}",
-                                    patchId, task.getX(), task.getY(),
-                                    r.totalCount(), r.validCount())
-                    );
-                    savePatchResult(patchId, "DONE", r.validCount(), r.totalCount());
-                }
-
-            } catch (Exception e) {
-                log.error("Batch inference failed for {} patches", requests.size(), e);
-                requests.forEach(r -> savePatchResult(r.patchId(), "FAILED", 0, 0));
-            }
-        }
-
-        // Шаг 3: удаляем временные файлы
-        tmpFiles.values().forEach(tmp -> {
-            try { Files.deleteIfExists(tmp); } catch (IOException ignored) {}
-        });
-
-        // Шаг 4: проверяем финализацию джобов
-        Set<UUID> jobsToCheck = new LinkedHashSet<>();
-        eventMap.values().forEach(e -> jobsToCheck.add(e.jobId()));
-        jobsToCheck.forEach(this::checkAndFinalizeJob);
     }
-
-    // ─────────────────────────────────────────────────────────────────────────
 
     private void savePatchResult(UUID patchId, String status,
                                  int validCount, int totalCount) {
@@ -219,7 +165,7 @@ public class InferenceWorker {
         if (pending != 0) return;
 
         int  totalCount = patchTaskRepository.sumEosinophilCountByJobId(jobId);
-        long failed     = patchTaskRepository.countByJobIdAndStatus(jobId, "FAILED");
+        long failed    = patchTaskRepository.countByJobIdAndStatus(jobId, "FAILED");
 
         List<PatchTask> done = patchTaskRepository.findByJobIdAndStatus(jobId, "DONE");
 
@@ -266,8 +212,6 @@ public class InferenceWorker {
 
         reportService.generateAsync(jobId);
     }
-
-    // ── Helpers ───────────────────────────────────────────────────────────────
 
     private void downloadToFile(String s3Path, Path dest) throws Exception {
         try (InputStream in = minioClient.getObject(

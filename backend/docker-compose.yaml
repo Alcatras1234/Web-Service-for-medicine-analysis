@@ -1,4 +1,3 @@
-version: "3.9"
 
 networks:
   dev:
@@ -120,6 +119,26 @@ services:
       - "15672:15672"
     networks:
       - dev 
+  inference:
+      build:
+        context: ./inference-service
+        dockerfile: Dockerfile
+      hostname: inference
+      ports:
+        - "8500:8500"
+      networks:
+        - dev
+      # GPU для NVIDIA Container Toolkit
+      environment:
+        - NVIDIA_VISIBLE_DEVICES=all
+        - MODEL_PATH=/app/triton-models/eosin_yolo/1/best.onnx
+      deploy:
+        resources:
+          reservations:
+            devices:
+              - driver: nvidia
+                count: 1
+                capabilities: [gpu]
 
 volumes:
   auth_data:
