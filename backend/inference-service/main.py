@@ -32,6 +32,11 @@ IOU_THRESH  = float(os.environ.get("IOU_THRESH",  "0.45"))
 INPUT_SIZE  = int(os.environ.get("INPUT_SIZE",    "448"))
 CONCURRENCY = int(os.environ.get("CONCURRENCY",   "4"))
 
+# ── Preprocessing constants ───────────────────────────────────────────────────
+IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32).reshape(1, 1, 3)
+IMAGENET_STD  = np.array([0.229, 0.224, 0.225], dtype=np.float32).reshape(1, 1, 3)
+WHITE_THRESH  = float(os.environ.get("WHITE_THRESH", "240"))  # uint8 [0..255]
+
 # ── ONNX Runtime ──────────────────────────────────────────────────────────────
 _available = ort.get_available_providers()
 logger.info(f"Available ORT providers: {_available}")
@@ -124,12 +129,9 @@ def run_nms(output: np.ndarray) -> list:
     x2 = coords[:, 0] + coords[:, 2] / 2
     y2 = coords[:, 1] + coords[:, 3] / 2
 
-    margin = INPUT_SIZE * 0.1
-    valid  = (
+    valid = (
         (coords[:, 2] > 2) & (coords[:, 3] > 2) &
-        (
-            coords[:, 2] < INPUT_SIZE * 0.9
-        ) & (coords[:, 3] < INPUT_SIZE * 0.9) &
+        (coords[:, 2] < INPUT_SIZE * 0.9) & (coords[:, 3] < INPUT_SIZE * 0.9) &
         (x2 > 0) & (y2 > 0) &
         (x1 < INPUT_SIZE) & (y1 < INPUT_SIZE)
     )
@@ -185,13 +187,31 @@ def apply_overlap_filter(dets: list, meta) -> dict:
         "valid_eosg":  valid_eosg,
     }
 
+# ── Общий препроцессинг RGB HWC uint8 → NCHW float32 ─────────────────────────
+def preprocess_hwc(hwc: np.ndarray) -> np.ndarray:
+    """RGB HWC uint8 [0..255] → NCHW float32, ImageNet normalized"""
+    hwc_f = hwc.astype(np.float32) / 255.0
+    hwc_n = (hwc_f - IMAGENET_MEAN) / IMAGENET_STD
+    return hwc_n.transpose(2, 0, 1)[np.newaxis].astype(np.float32)  # (1, 3, H, W)
+
 # ── GPU inference ─────────────────────────────────────────────────────────────
 def _run_single(nchw: np.ndarray) -> np.ndarray:
     return sess.run([output_name], {input_name: nchw})[0]
 
 def _run_single_patch(patch: PatchItem) -> dict:
-    raw    = base64.b64decode(patch.tensor_base64)
-    nchw   = np.frombuffer(raw, dtype=np.float32).reshape(1, 3, INPUT_SIZE, INPUT_SIZE).copy()
+    raw = base64.b64decode(patch.tensor_base64)
+
+    # Java шлёт RGB HWC uint8: [H*W*3] байт
+    hwc = np.frombuffer(raw, dtype=np.uint8).reshape(INPUT_SIZE, INPUT_SIZE, 3).copy()
+
+    mean_val = float(hwc.mean())
+    logger.info(f"patch={patch.patch_id[:8]} mean={mean_val:.1f} skip={mean_val > WHITE_THRESH}")
+
+    if mean_val > WHITE_THRESH:
+        return {"patch_id": patch.patch_id, "total_count": 0,
+                "valid_count": 0, "valid_eos": 0, "valid_eosg": 0}
+
+    nchw   = preprocess_hwc(hwc)
     output = sess.run([output_name], {input_name: nchw})[0]
     dets   = run_nms(output)
     return apply_overlap_filter(dets, patch)
@@ -222,10 +242,11 @@ def health():
 async def infer(req: InferRequest):
     img_bytes = base64.b64decode(req.image_base64)
     pil_img   = Image.open(io.BytesIO(img_bytes)).convert("RGB")
-    img_bgr   = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
-    resized   = cv2.resize(img_bgr, (INPUT_SIZE, INPUT_SIZE))
-    rgb       = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
-    nchw      = rgb.transpose(2, 0, 1).astype(np.float32)[np.newaxis] / 255.0
+    img_rgb   = np.array(pil_img)
+    resized   = cv2.resize(img_rgb, (INPUT_SIZE, INPUT_SIZE))
+
+    # FIX: ImageNet нормализация (была только /255.0)
+    nchw = preprocess_hwc(resized)
 
     async with _sem:
         loop   = asyncio.get_event_loop()
@@ -239,8 +260,22 @@ async def infer(req: InferRequest):
 
 @app.post("/infer_raw")
 async def infer_raw(req: TensorRequest):
-    raw  = base64.b64decode(req.tensor_base64)
-    nchw = np.frombuffer(raw, dtype=np.float32).reshape(1, 3, INPUT_SIZE, INPUT_SIZE).copy()
+    raw = base64.b64decode(req.tensor_base64)
+
+    # FIX: Java теперь шлёт uint8 HWC, не float32 CHW
+    hwc = np.frombuffer(raw, dtype=np.uint8).reshape(INPUT_SIZE, INPUT_SIZE, 3).copy()
+
+    mean_val = float(hwc.mean())
+    logger.info(f"[infer_raw] mean={mean_val:.1f} skip={mean_val > WHITE_THRESH}")
+
+    if mean_val > WHITE_THRESH:
+        meta = PatchItem(patch_id="single", tensor_base64=req.tensor_base64,
+                         patch_wsi_size=req.patch_wsi_size, overlap_px=req.overlap_px,
+                         edge_left=req.edge_left, edge_top=req.edge_top,
+                         edge_right=req.edge_right, edge_bottom=req.edge_bottom)
+        return apply_overlap_filter([], meta)
+
+    nchw = preprocess_hwc(hwc)
 
     async with _sem:
         loop   = asyncio.get_event_loop()
@@ -253,9 +288,8 @@ async def infer_raw(req: TensorRequest):
     dets   = run_nms(output)
     result = apply_overlap_filter(dets, meta)
 
-    logger.debug(f"[DEBUG] scores max={output[0][4:, :].max():.4f} "
-                 f"dets={len(run_nms(output))} "
-                 f"valid={result['valid_count']}")
+    logger.debug(f"[DEBUG] scores_max={output[0][4:, :].max():.4f} "
+                 f"dets={len(dets)} valid={result['valid_count']}")
     return result
 
 @app.post("/infer_batch")
@@ -270,10 +304,9 @@ async def infer_batch(req: BatchTensorRequest):
 async def debug_raw(req: InferRequest):
     img_bytes = base64.b64decode(req.image_base64)
     pil_img   = Image.open(io.BytesIO(img_bytes)).convert("RGB")
-    img_bgr   = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
-    resized   = cv2.resize(img_bgr, (INPUT_SIZE, INPUT_SIZE))
-    rgb       = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
-    nchw      = rgb.transpose(2, 0, 1).astype(np.float32)[np.newaxis] / 255.0
+    img_rgb   = np.array(pil_img)
+    resized   = cv2.resize(img_rgb, (INPUT_SIZE, INPUT_SIZE))
+    nchw      = preprocess_hwc(resized)
 
     output = sess.run([output_name], {input_name: nchw})[0]
     scores = output[0][4:, :]

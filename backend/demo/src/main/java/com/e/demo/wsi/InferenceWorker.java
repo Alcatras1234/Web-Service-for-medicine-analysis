@@ -75,11 +75,12 @@ public class InferenceWorker {
             boolean edgeBottom = !patchTaskRepository
                 .existsByJobIdAndXAndY(event.jobId(), patchX, patchY + PATCH_STRIDE);
 
-            float[] tensor = toFloat32CHW(img, MODEL_SIZE, MODEL_SIZE);
+            // Отправляем RGB HWC uint8 байты (как в оригинальном питоновском коде)
+            byte[] tensor = toRgbHWC(img, MODEL_SIZE, MODEL_SIZE);
 
             InferenceHttpClient.InferResult result = inferenceClient.infer(
                 tensor, PATCH_WSI_SIZE, OVERLAP_PX,
-                false, false, false, false
+                edgeLeft, edgeTop, edgeRight, edgeBottom
             );
 
             log.info("Patch {} ({},{}) → total={} valid={}",
@@ -174,27 +175,30 @@ public class InferenceWorker {
         }
     }
 
-    private float[] toFloat32CHW(BufferedImage src, int targetW, int targetH) {
-        // ImageG.Imp.barImage() держить RGB meaning Integers в tier WSI:
+    /**
+     * Конвертируем BufferedImage → RGB HWC uint8 байты.
+     * Формат: [H * W * 3], порядок R, G, B для каждого пикселя.
+     * Питон принимает этот формат и делает нормализацию сам.
+     */
+    private byte[] toRgbHWC(BufferedImage src, int targetW, int targetH) {
         BufferedImage img = src;
         if (src.getWidth() != targetW || src.getHeight() != targetH) {
             img = new BufferedImage(targetW, targetH, BufferedImage.TYPE_INT_RGB);
             Graphics2D g2d = img.createGraphics();
             g2d.setRenderingHint(RenderingHints.KEY_INTERPOLATION,
-                                RenderingHints.VALUE_INTERPOLATION_BILINEAR);
+                                 RenderingHints.VALUE_INTERPOLATION_BILINEAR);
             g2d.drawImage(src, 0, 0, targetW, targetH, null);
             g2d.dispose();
         }
 
-        // Төдра модель expectе нормированный тензор [0..1] для float32 CLN:
-        float[] data = new float[3 * targetW * targetH];
+        byte[] data = new byte[targetH * targetW * 3];
         for (int y = 0; y < targetH; y++) {
             for (int x = 0; x < targetW; x++) {
                 int rgb = img.getRGB(x, y);
-                int o   = y * targetW + x;
-                data[o]                         = ((rgb >> 16) & 0xFF) / 255.0f;
-                data[targetW * targetH + o]     = ((rgb >>  8) & 0xFF) / 255.0f;
-                data[2 * targetW * targetH + o] = ( rgb        & 0xFF) / 255.0f;
+                int idx = (y * targetW + x) * 3;
+                data[idx]     = (byte) ((rgb >> 16) & 0xFF); // R
+                data[idx + 1] = (byte) ((rgb >>  8) & 0xFF); // G
+                data[idx + 2] = (byte) ( rgb        & 0xFF); // B
             }
         }
         return data;

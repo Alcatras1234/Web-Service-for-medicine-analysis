@@ -9,8 +9,6 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
-import java.nio.ByteBuffer;
-import java.nio.ByteOrder;
 import java.time.Duration;
 import java.util.*;
 
@@ -41,13 +39,15 @@ public class InferenceHttpClient {
 
     public InferenceHttpClient(@Value("${inference.url}") String baseUrl) {
         this.baseUrl = baseUrl;
-        this.http = HttpClient.newBuilder().version(HttpClient.Version.HTTP_1_1)
+        this.http = HttpClient.newBuilder()
+                .version(HttpClient.Version.HTTP_1_1)
                 .connectTimeout(Duration.ofSeconds(10))
                 .build();
     }
 
+    // Принимаем byte[] (RGB HWC uint8)
     public InferResult infer(
-        float[] tensor,
+        byte[] rgbHwc,
         int patchWsiSize,
         int overlapPx,
         boolean edgeLeft,
@@ -55,13 +55,9 @@ public class InferenceHttpClient {
         boolean edgeRight,
         boolean edgeBottom
     ) throws Exception {
-        // Кодируем тензор в base64
-        ByteBuffer buf = ByteBuffer.allocate(tensor.length * 4)
-                .order(ByteOrder.LITTLE_ENDIAN);
-        for (float v : tensor) buf.putFloat(v);
-        String b64 = Base64.getEncoder().encodeToString(buf.array());
+        // Кодируем байты напрямую в base64
+        String b64 = Base64.getEncoder().encodeToString(rgbHwc);
 
-        // Сериализуем через record — Jackson корректно пишет boolean/int
         TensorRequestDto payload = new TensorRequestDto(
             b64, patchWsiSize, overlapPx,
             edgeLeft, edgeTop, edgeRight, edgeBottom
@@ -70,7 +66,6 @@ public class InferenceHttpClient {
         log.debug("POST /infer_raw body preview: {}",
             body.length() > 120 ? body.substring(0, 120) + "..." : body);
 
-        // Отправляем запрос
         HttpRequest req = HttpRequest.newBuilder()
                 .uri(URI.create(baseUrl + "/infer_raw"))
                 .header("Content-Type", "application/json")
@@ -83,7 +78,6 @@ public class InferenceHttpClient {
                 "Inference HTTP " + resp.statusCode() + ": " + resp.body());
         }
 
-        // Десериализуем ответ
         @SuppressWarnings("unchecked")
         Map<String, Object> result =
             (Map<String, Object>) mapper.readValue(resp.body(), Map.class);
