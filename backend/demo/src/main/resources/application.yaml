@@ -49,4 +49,4 @@ jwt:
 
 
 inference:
-  url: http://host.docker.internal:8500
+  url: http://inference:8500
