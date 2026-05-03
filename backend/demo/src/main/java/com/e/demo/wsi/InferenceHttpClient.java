@@ -1,7 +1,7 @@
-// InferenceHttpClient.java
 package com.e.demo.wsi;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
@@ -15,55 +15,84 @@ import java.time.Duration;
 import java.util.*;
 
 @Component
+@Slf4j
 public class InferenceHttpClient {
 
-    public record InferResult(int totalCount, int validCount, int validEos, int validEosg) {}
+    public record InferResult(
+        int totalCount,
+        int validCount,
+        int validEos,
+        int validEosg
+    ) {}
 
-    private final HttpClient   http   = HttpClient.newHttpClient();
+    public record TensorRequestDto(
+        String  tensor_base64,
+        int     patch_wsi_size,
+        int     overlap_px,
+        boolean edge_left,
+        boolean edge_top,
+        boolean edge_right,
+        boolean edge_bottom
+    ) {}
+
+    private final HttpClient http;
     private final ObjectMapper mapper = new ObjectMapper();
-    private final String       url;
+    private final String baseUrl;
 
     public InferenceHttpClient(@Value("${inference.url}") String baseUrl) {
-        this.url = baseUrl + "/infer_raw";
+        this.baseUrl = baseUrl;
+        this.http = HttpClient.newBuilder().version(HttpClient.Version.HTTP_1_1)
+                .connectTimeout(Duration.ofSeconds(10))
+                .build();
     }
 
     public InferResult infer(
-            float[] tensor,
-            int patchWsiSize, int overlapPx,
-            boolean edgeLeft, boolean edgeTop,
-            boolean edgeRight, boolean edgeBottom
+        float[] tensor,
+        int patchWsiSize,
+        int overlapPx,
+        boolean edgeLeft,
+        boolean edgeTop,
+        boolean edgeRight,
+        boolean edgeBottom
     ) throws Exception {
-        ByteBuffer buf = ByteBuffer.allocate(tensor.length * 4).order(ByteOrder.LITTLE_ENDIAN);
+        // Кодируем тензор в base64
+        ByteBuffer buf = ByteBuffer.allocate(tensor.length * 4)
+                .order(ByteOrder.LITTLE_ENDIAN);
         for (float v : tensor) buf.putFloat(v);
         String b64 = Base64.getEncoder().encodeToString(buf.array());
 
-        Map<String, Object> json = new LinkedHashMap<>();
-        json.put("tensor_base64",  b64);
-        json.put("patch_wsi_size", patchWsiSize);
-        json.put("overlap_px",     overlapPx);
-        json.put("edge_left",      edgeLeft);
-        json.put("edge_top",       edgeTop);
-        json.put("edge_right",     edgeRight);
-        json.put("edge_bottom",    edgeBottom);
+        // Сериализуем через record — Jackson корректно пишет boolean/int
+        TensorRequestDto payload = new TensorRequestDto(
+            b64, patchWsiSize, overlapPx,
+            edgeLeft, edgeTop, edgeRight, edgeBottom
+        );
+        String body = mapper.writeValueAsString(payload);
+        log.debug("POST /infer_raw body preview: {}",
+            body.length() > 120 ? body.substring(0, 120) + "..." : body);
 
-        String body = mapper.writeValueAsString(json);
+        // Отправляем запрос
         HttpRequest req = HttpRequest.newBuilder()
-                .uri(URI.create(url))
+                .uri(URI.create(baseUrl + "/infer_raw"))
                 .header("Content-Type", "application/json")
                 .POST(HttpRequest.BodyPublishers.ofString(body))
                 .build();
 
         HttpResponse<String> resp = http.send(req, HttpResponse.BodyHandlers.ofString());
         if (resp.statusCode() != 200) {
-            throw new RuntimeException("Inference HTTP " + resp.statusCode() + ": " + resp.body());
+            throw new RuntimeException(
+                "Inference HTTP " + resp.statusCode() + ": " + resp.body());
         }
 
-        Map<String, Object> result = mapper.readValue(resp.body(),
-                mapper.getTypeFactory().constructMapType(Map.class, String.class, Object.class));
+        // Десериализуем ответ
+        @SuppressWarnings("unchecked")
+        Map<String, Object> result =
+            (Map<String, Object>) mapper.readValue(resp.body(), Map.class);
+
         return new InferResult(
-                ((Number) result.getOrDefault("total_count", 0)).intValue(),
-                ((Number) result.getOrDefault("valid_count", 0)).intValue(),
-                ((Number) result.getOrDefault("valid_eos",   0)).intValue(),
-                ((Number) result.getOrDefault("valid_eosg",  0)).intValue());
+            ((Number) result.getOrDefault("total_count", 0)).intValue(),
+            ((Number) result.getOrDefault("valid_count", 0)).intValue(),
+            ((Number) result.getOrDefault("valid_eos",   0)).intValue(),
+            ((Number) result.getOrDefault("valid_eosg",  0)).intValue()
+        );
     }
 }

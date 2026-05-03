@@ -166,27 +166,33 @@ def run_nms(output: np.ndarray) -> list:
     ]
 
 # ── Overlap zone фильтрация ───────────────────────────────────────────────────
-def apply_overlap_filter(dets: list, meta: PatchItem) -> dict:
-    if dets is None:
-        dets = []
-
+def apply_overlap_filter(dets: list, meta) -> dict:
+    """
+    Фильтр детекция по overlap зоне.
+    Детекция в близости к краям патча — это дубли соседей.
+    Оставляем только детекция в безопасной зоне патча.
+    """
     half_ov = meta.overlap_px / 2
-    lo_x = half_ov                          if not meta.edge_left   else 0.0
-    lo_y = half_ov                          if not meta.edge_top    else 0.0
-    hi_x = (meta.patch_wsi_size - half_ov)  if not meta.edge_right  else float(meta.patch_wsi_size)
-    hi_y = (meta.patch_wsi_size - half_ov)  if not meta.edge_bottom else float(meta.patch_wsi_size)
+
+    # Безопасная зона = центральная часть патча без overlap
+    lo_x = half_ov
+    lo_y = half_ov
+    hi_x = meta.patch_wsi_size - half_ov
+    hi_y = meta.patch_wsi_size - half_ov
 
     eos_count = eosg_count = valid_eos = valid_eosg = 0
     for d in dets:
         name = CLASS_NAMES.get(d["cls_id"], "unknown")
         if name == "eos":    eos_count  += 1
         elif name == "eosg": eosg_count += 1
+
+        # Детекция в безопасной зоне — без дублей
         if lo_x <= d["cx"] <= hi_x and lo_y <= d["cy"] <= hi_y:
             if name == "eos":    valid_eos  += 1
             elif name == "eosg": valid_eosg += 1
 
     return {
-        "patch_id":    meta.patch_id,
+        "patch_id":    getattr(meta, "patch_id", "single"),
         "total_count": eos_count + eosg_count,
         "valid_count": valid_eos + valid_eosg,
         "valid_eos":   valid_eos,

@@ -79,7 +79,7 @@ public class InferenceWorker {
 
             InferenceHttpClient.InferResult result = inferenceClient.infer(
                 tensor, PATCH_WSI_SIZE, OVERLAP_PX,
-                edgeLeft, edgeTop, edgeRight, edgeBottom
+                false, false, false, false
             );
 
             log.info("Patch {} ({},{}) → total={} valid={}",
