@@ -3,8 +3,10 @@ package com.e.demo.wsi;
 import com.e.demo.dto.PatchInferenceEvent;
 import com.e.demo.dto.WsiUploadedEvent;
 import com.e.demo.entity.PatchTask;
+import com.e.demo.entity.Job;
 import com.e.demo.repository.JobRepository;
 import com.e.demo.repository.PatchTaskRepository;
+import com.e.demo.repository.SlideRepository;
 import io.minio.MinioClient;
 import io.minio.PutObjectArgs;
 import io.minio.GetObjectArgs;
@@ -35,6 +37,8 @@ public class TilingWorker {
     private static final int BATCH_SIZE    = 50;
     // Параллельные загрузки в MinIO внутри одного батча
     private static final int UPLOAD_THREADS = 8;
+    // E3: порог белизны (среднее по каналам). Чем выше — тем меньше патчей отсеется.
+    private static final double WHITE_THRESHOLD = 240.0;
 
     private final ExecutorService uploadExecutor =
             Executors.newFixedThreadPool(UPLOAD_THREADS);
@@ -43,6 +47,7 @@ public class TilingWorker {
     private final RabbitTemplate rabbitTemplate;
     private final PatchTaskRepository patchTaskRepository;
     private final JobRepository jobRepository;
+    private final SlideRepository slideRepository;
 
     @Value("${minio.bucketName}")
     private String bucket;
@@ -50,11 +55,13 @@ public class TilingWorker {
     public TilingWorker(@Qualifier("internalClient") MinioClient minioClient,
                         RabbitTemplate rabbitTemplate,
                         PatchTaskRepository patchTaskRepository,
-                        JobRepository jobRepository) {
+                        JobRepository jobRepository,
+                        SlideRepository slideRepository) {
         this.minioClient = minioClient;
         this.rabbitTemplate = rabbitTemplate;
         this.patchTaskRepository = patchTaskRepository;
         this.jobRepository = jobRepository;
+        this.slideRepository = slideRepository;
     }
 
     record TileCoord(int x, int y, int w, int h) {}
@@ -74,6 +81,24 @@ public class TilingWorker {
                 int imgH = wsi.height();
                 log.info("WSI size: {}x{} job={}", imgW, imgH, event.jobId());
 
+                // E1: извлекаем MPP из OME-метаданных и сохраняем в slide
+                Double mppX = wsi.mppX();
+                Double mppY = wsi.mppY();
+                String source;
+                if (mppX != null && mppY != null && mppX > 0 && mppY > 0) {
+                    source = "METADATA";
+                } else {
+                    mppX = BioFormatsWsiReader.DEFAULT_MPP;
+                    mppY = BioFormatsWsiReader.DEFAULT_MPP;
+                    source = "DEFAULT";
+                    log.warn("MPP not found in metadata for job={}, using DEFAULT={}", event.jobId(), mppX);
+                }
+
+                Job job = jobRepository.findById(event.jobId()).orElseThrow();
+                slideRepository.updateCalibration(job.getSlideId(), mppX, mppY, source, imgW, imgH);
+                log.info("Calibration: job={} mppX={} mppY={} source={}",
+                        event.jobId(), mppX, mppY, source);
+
                 // Собираем координаты (только int-ы — памяти почти не занимает)
                 List<TileCoord> coords = new ArrayList<>();
                 for (int y = 0; y < imgH; y += STEP) {
@@ -85,6 +110,8 @@ public class TilingWorker {
                 }
                 log.info("Total patches: {} job={}", coords.size(), event.jobId());
 
+                int skippedWhite = 0;
+
                 // Обрабатываем батчами — в памяти только BATCH_SIZE патчей одновременно
                 for (int batchStart = 0; batchStart < coords.size(); batchStart += BATCH_SIZE) {
                     int batchEnd = Math.min(batchStart + BATCH_SIZE, coords.size());
@@ -94,24 +121,34 @@ public class TilingWorker {
                     List<PatchInferenceEvent> mqBatch = new ArrayList<>(batch.size());
                     List<Future<?>> uploads = new ArrayList<>(batch.size());
 
-                    // Читаем патчи батча (BioFormats не thread-safe — читаем в основном потоке)
-                    // Сериализуем в bytes и отдаём загрузку в пул
-                    List<String> paths = new ArrayList<>(batch.size());
-                    List<UUID> ids = new ArrayList<>(batch.size());
-
                     for (TileCoord c : batch) {
                         BufferedImage img = wsi.readRegion(c.x(), c.y(), c.w(), c.h());
+
+                        // E3: белые патчи отсекаем здесь — не грузим в MinIO, не шлём в очередь
+                        if (isMostlyWhite(img)) {
+                            img.flush();
+                            UUID patchId = UUID.randomUUID();
+                            PatchTask task = buildPatchTask(event.jobId(), patchId, null,
+                                    c.x(), c.y(), c.w(), c.h());
+                            task.setStatus("SKIPPED_WHITE");
+                            dbBatch.add(task);
+                            skippedWhite++;
+                            continue;
+                        }
+
                         byte[] bytes = toBytes(img);
-                        img.flush(); // явно освобождаем BufferedImage
+                        img.flush();
 
                         UUID patchId = UUID.randomUUID();
                         String patchPath = "patches/%s/patch_%d_%d.png"
                                 .formatted(event.jobId(), c.x(), c.y());
 
-                        paths.add(patchPath);
-                        ids.add(patchId);
+                        dbBatch.add(buildPatchTask(event.jobId(), patchId, patchPath,
+                                c.x(), c.y(), c.w(), c.h()));
+                        mqBatch.add(new PatchInferenceEvent(
+                                event.jobId(), patchId, patchPath,
+                                c.x(), c.y(), c.w(), c.h()));
 
-                        // Загрузка в MinIO параллельно
                         uploads.add(uploadExecutor.submit(() -> {
                             try {
                                 uploadBytes(patchPath, bytes);
@@ -126,31 +163,22 @@ public class TilingWorker {
                         f.get();
                     }
 
-                    // Готовим DB и MQ записи (bytes уже не нужны — GC соберёт)
-                    for (int i = 0; i < batch.size(); i++) {
-                        TileCoord c = batch.get(i);
-                        String path = paths.get(i);
-                        UUID patchId = ids.get(i);
-
-                        dbBatch.add(buildPatchTask(event.jobId(), patchId, path,
-                                c.x(), c.y(), c.w(), c.h()));
-                        mqBatch.add(new PatchInferenceEvent(
-                                event.jobId(), patchId, path,
-                                c.x(), c.y(), c.w(), c.h()));
-                    }
-
-                    // Батчевый INSERT в БД
+                    // Батчевый INSERT в БД (включая skipped_white записи)
                     patchTaskRepository.saveAll(dbBatch);
 
-                    // Публикуем в RabbitMQ
+                    // Публикуем в RabbitMQ только не-белые патчи
                     mqBatch.forEach(p -> rabbitTemplate.convertAndSend("patches.inference", p));
 
                     totalPatches += batch.size();
 
                     if (totalPatches % 500 == 0 || batchEnd == coords.size()) {
-                        log.info("TilingWorker progress: {}/{} patches, job={}",
-                                totalPatches, coords.size(), event.jobId());
+                        log.info("TilingWorker progress: {}/{} patches (skipped_white={}), job={}",
+                                totalPatches, coords.size(), skippedWhite, event.jobId());
                     }
+                }
+
+                if (skippedWhite > 0) {
+                    jobRepository.incrementSkippedWhite(event.jobId(), skippedWhite);
                 }
             }
 
@@ -167,6 +195,30 @@ public class TilingWorker {
                 try { Files.deleteIfExists(tmpFile); } catch (IOException ignored) {}
             }
         }
+    }
+
+    /**
+     * E3: быстрая проверка «патч почти белый» — сэмплируем каждый 16-й пиксель.
+     * Если средняя яркость по RGB > WHITE_THRESHOLD — патч считается фоном.
+     */
+    private boolean isMostlyWhite(BufferedImage img) {
+        int w = img.getWidth();
+        int h = img.getHeight();
+        long sum = 0;
+        long count = 0;
+        for (int y = 0; y < h; y += 4) {
+            for (int x = 0; x < w; x += 4) {
+                int rgb = img.getRGB(x, y);
+                int r = (rgb >> 16) & 0xFF;
+                int g = (rgb >>  8) & 0xFF;
+                int b =  rgb        & 0xFF;
+                sum += (r + g + b);
+                count += 3;
+            }
+        }
+        if (count == 0) return false;
+        double mean = (double) sum / count;
+        return mean > WHITE_THRESHOLD;
     }
 
     private byte[] toBytes(BufferedImage img) throws IOException {

@@ -50,6 +50,24 @@ public class Job {
     @Column(name = "heatmap_path")
     private String heatmapPath;
 
+    // E3: количество отсеянных белых патчей (не отправлены на инференс)
+    @Column(name = "skipped_white")
+    private Integer skippedWhite = 0;
+
+    // E6/E8: версия ML-модели и путь к JSON детекций в MinIO
+    @Column(name = "model_version")
+    private String modelVersion;
+
+    @Column(name = "detections_path")
+    private String detectionsPath;
+
+    // Текущая фаза: QUEUED / TILING / INFERENCING / FINALIZING / REPORTING / DONE
+    @Column(name = "phase")
+    private String phase;
+
+    @Column(name = "error_code")
+    private String errorCode;
+
     @Column(name = "created_at")
     private Instant createdAt = Instant.now();
 

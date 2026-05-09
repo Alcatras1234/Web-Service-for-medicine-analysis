@@ -23,6 +23,7 @@ services:
       PGDATA: "/var/lib/postgresql/data/pgdata"
     volumes:
       - auth_data:/var/lib/postgresql/data/pgdata
+      - wsi-cache:/tmp/wsi-cache
     ports:
       - "5432:5432"
     networks:
@@ -142,6 +143,7 @@ services:
 
 volumes:
   auth_data:
+  wsi-cache:
   # redis-data:
   pgadmin_data:
 
