@@ -1,6 +1,6 @@
 "use client"
 
-import React, { useState, useRef } from "react"
+import React, { useState, useRef, useEffect } from "react"
 import { useRouter } from "next/navigation"
 import { toast } from "sonner"
 import {
@@ -19,6 +19,21 @@ interface FileWithPreview extends File {
   preview?: string
 }
 
+interface CaseOption {
+  id: number
+  patientId: string
+  name: string | null
+  status: string
+}
+
+const BIOPSY_LOCATIONS = [
+  { value: "", label: "— не указано —" },
+  { value: "PROXIMAL", label: "Проксимальный отдел" },
+  { value: "MID",      label: "Средний отдел" },
+  { value: "DISTAL",   label: "Дистальный отдел" },
+  { value: "OTHER",    label: "Другая локация" },
+]
+
 export default function UploadPage() {
   const router = useRouter()
   const [file, setFile] = useState<FileWithPreview | null>(null)
@@ -27,7 +42,22 @@ export default function UploadPage() {
   const [isUploading, setIsUploading] = useState(false)
   const [patientId, setPatientId] = useState("")
   const [description, setDescription] = useState("")
+  // E5: выбор кейса и локации биопсии
+  const [cases, setCases] = useState<CaseOption[]>([])
+  const [caseId, setCaseId] = useState<string>("")          // "" = без кейса, "NEW" = создать
+  const [newCaseName, setNewCaseName] = useState("")
+  const [biopsyLocation, setBiopsyLocation] = useState("")
   const fileInputRef = useRef<HTMLInputElement>(null)
+
+  // Загружаем активные кейсы текущего пользователя
+  useEffect(() => {
+    fetch("/api/cases", { credentials: "include", cache: "no-store" })
+      .then(r => r.ok ? r.json() : [])
+      .then((rows: CaseOption[]) => {
+        setCases(rows.filter(c => c.status !== "SIGNED_OFF"))
+      })
+      .catch(() => {})
+  }, [])
 
   const handleDragOver = (e: React.DragEvent) => { e.preventDefault(); setIsDragging(true) }
   const handleDragLeave = (e: React.DragEvent) => { e.preventDefault(); setIsDragging(false) }
@@ -99,12 +129,34 @@ export default function UploadPage() {
         xhr.send(file)
       })
 
+      // ── Если выбрано "создать новый кейс" — создаём его сейчас
+      let resolvedCaseId: number | null = null
+      if (caseId === "NEW") {
+        const cRes = await fetch("/api/cases", {
+          method: "POST",
+          credentials: "include",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ patientId, name: newCaseName || null }),
+        })
+        if (!cRes.ok) throw new Error(`create case ${cRes.status}: ${await cRes.text()}`)
+        resolvedCaseId = (await cRes.json()).id
+      } else if (caseId) {
+        resolvedCaseId = Number(caseId)
+      }
+
       // ── Шаг 3: confirm-upload ────────────────────────────────────────────
       const confirmRes = await fetch("/api/files/confirm-upload", {
         method: "POST",
         credentials: "include",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ objectKey, filename: file.name, patientId, description }),
+        body: JSON.stringify({
+          objectKey,
+          filename: file.name,
+          patientId,
+          description,
+          caseId: resolvedCaseId,
+          biopsyLocation: biopsyLocation || null,
+        }),
       })
       if (confirmRes.status === 401) {
         toast.error("Сессия истекла, войдите заново")
@@ -167,6 +219,48 @@ export default function UploadPage() {
                 </Label>
                 <Input id="scan-date" type="date"
                        className="bg-white border-slate-300" disabled={isUploading} />
+              </div>
+            </div>
+
+            <div className="grid gap-4 md:grid-cols-2">
+              <div className="space-y-2">
+                <Label htmlFor="case-id" className="text-slate-700 font-medium">
+                  Клинический кейс
+                </Label>
+                <select id="case-id"
+                        value={caseId}
+                        onChange={(e) => setCaseId(e.target.value)}
+                        disabled={isUploading}
+                        className="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                  <option value="">— без кейса —</option>
+                  {cases.map(c => (
+                    <option key={c.id} value={c.id}>
+                      {c.patientId}{c.name ? ` · ${c.name}` : ""}
+                    </option>
+                  ))}
+                  <option value="NEW">+ создать новый кейс</option>
+                </select>
+                {caseId === "NEW" && (
+                  <Input placeholder="Название кейса (опц.)"
+                         value={newCaseName}
+                         onChange={(e) => setNewCaseName(e.target.value)}
+                         className="bg-white border-slate-300 mt-2"
+                         disabled={isUploading} />
+                )}
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="biopsy-location" className="text-slate-700 font-medium">
+                  Локация биопсии
+                </Label>
+                <select id="biopsy-location"
+                        value={biopsyLocation}
+                        onChange={(e) => setBiopsyLocation(e.target.value)}
+                        disabled={isUploading}
+                        className="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                  {BIOPSY_LOCATIONS.map(opt => (
+                    <option key={opt.value} value={opt.value}>{opt.label}</option>
+                  ))}
+                </select>
               </div>
             </div>
 

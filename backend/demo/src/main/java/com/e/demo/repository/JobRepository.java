@@ -74,4 +74,26 @@ public interface JobRepository extends JpaRepository<Job, UUID> {
                     @Param("now") Instant now);
 
     Optional<Job> findFirstBySlideIdOrderByCreatedAtDesc(Integer slideId);
+
+    @Modifying
+    @Transactional
+    @Query("UPDATE Job j SET j.skippedWhite = j.skippedWhite + :delta WHERE j.id = :jobId")
+    void incrementSkippedWhite(@Param("jobId") UUID jobId, @Param("delta") int delta);
+
+    @Modifying
+    @Transactional
+    @Query("UPDATE Job j SET j.phase = :phase, j.updatedAt = :now WHERE j.id = :jobId")
+    void updatePhase(@Param("jobId") UUID jobId,
+                     @Param("phase") String phase,
+                     @Param("now") Instant now);
+
+    @Modifying
+    @Transactional
+    @Query("UPDATE Job j SET j.modelVersion = :v WHERE j.id = :jobId")
+    void updateModelVersion(@Param("jobId") UUID jobId, @Param("v") String version);
+
+    @Modifying
+    @Transactional
+    @Query("UPDATE Job j SET j.detectionsPath = :path WHERE j.id = :jobId")
+    void updateDetectionsPath(@Param("jobId") UUID jobId, @Param("path") String path);
 }

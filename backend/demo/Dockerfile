@@ -1,25 +1,26 @@
+# syntax=docker/dockerfile:1.4
 # 1. Этап сборки с Maven
 FROM maven:3.9.4-eclipse-temurin-21 AS build
 
 WORKDIR /backend
 
 # Копирование pom.xml и установка зависимостей
+# BuildKit cache mount — кеш Maven переживает rebuild контейнера
 COPY pom.xml /backend/
-RUN mvn dependency:resolve
+RUN --mount=type=cache,target=/root/.m2 \
+    mvn dependency:resolve
 
 # Копирование исходников
 COPY src /backend/src/
 
 # Очистка и сборка проекта с тестами
-RUN mvn clean install -DskipTests
+RUN --mount=type=cache,target=/root/.m2 \
+    mvn clean install -DskipTests
 
 # 2. Этап для запуска приложения с JDK
 FROM eclipse-temurin:21-jdk-alpine AS server_app
 
 WORKDIR /app
-
-# Установка curl (если нужно для проверки)
-RUN apk add --no-cache curl
 
 # Копирование собранного JAR файла
 COPY --from=build /backend/target/*.jar /app/backend.jar

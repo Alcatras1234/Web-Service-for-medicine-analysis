@@ -35,6 +35,8 @@ interface Slide {
   totalEosinophils?: number
   maxHpfCount?: number
   reportReady?: boolean
+  caseId?: number | null
+  biopsyLocation?: string | null
 }
 
 export default function DashboardPage() {
@@ -83,9 +85,36 @@ export default function DashboardPage() {
     (s.filename ?? "").toLowerCase().includes(searchQuery.toLowerCase())
   )
 
-  const handleDelete = (id: number) => {
-    setSlides(slides.filter(s => s.id !== id))
-    toast.success("Исследование удалено из списка")
+  const handleDelete = async (id: number) => {
+    if (!confirm("Удалить это исследование? (soft-delete, файл в MinIO останется для аудита)")) return
+    try {
+      const res = await fetch(`/api/files/slides/${id}`, {
+        method: "DELETE",
+        credentials: "include",
+      })
+      if (res.status === 409) {
+        toast.error("Нельзя удалить — кейс уже подписан")
+        return
+      }
+      if (!res.ok) {
+        toast.error(`Ошибка удаления: HTTP ${res.status}`)
+        return
+      }
+      setSlides(slides.filter(s => s.id !== id))
+      toast.success("Исследование удалено")
+    } catch (e) {
+      console.error(e)
+      toast.error("Сетевая ошибка при удалении")
+    }
+  }
+
+  const openViewer = (slide: Slide) => {
+    // Если слайд в кейсе — открываем кейс-вьюер, иначе самостоятельный
+    if (slide.caseId) {
+      router.push(`/cases/${slide.caseId}/slides/${slide.id}`)
+    } else {
+      router.push(`/viewer/${slide.id}`)
+    }
   }
 
   const handleDownloadPdf = async (slide: Slide) => {
@@ -161,6 +190,10 @@ export default function DashboardPage() {
             </span>
           </div>
           <div className="flex items-center gap-2">
+            <Button variant="ghost" onClick={() => router.push("/cases")}
+                    className="text-slate-700 hover:text-blue-700">
+              Кейсы
+            </Button>
             <Button variant="ghost" size="icon" onClick={fetchSlides} title="Обновить список">
               <RefreshCw className={`h-4 w-4 ${isLoading ? "animate-spin" : ""}`} />
             </Button>
@@ -217,6 +250,7 @@ export default function DashboardPage() {
                 <TableHead>Дата</TableHead>
                 <TableHead>Статус</TableHead>
                 <TableHead className="hidden md:table-cell">Диагноз</TableHead>
+                <TableHead className="hidden lg:table-cell">Peak eos/HPF</TableHead>
                 <TableHead className="text-right">Действия</TableHead>
               </TableRow>
             </TableHeader>
@@ -229,7 +263,7 @@ export default function DashboardPage() {
                 </TableRow>
               ) : filteredSlides.length === 0 ? (
                 <TableRow>
-                  <TableCell colSpan={7} className="h-24 text-center text-slate-500">
+                  <TableCell colSpan={8} className="h-24 text-center text-slate-500">
                     {searchQuery ? "По вашему запросу ничего не найдено" : "Исследований пока нет"}
                   </TableCell>
                 </TableRow>
@@ -259,8 +293,16 @@ export default function DashboardPage() {
                             : "bg-emerald-100 text-emerald-700 border-emerald-200"
                         }>
                           {slide.diagnosis === "POSITIVE" ? "ПОЗИТИВНЫЙ" : "НЕГАТИВНЫЙ"}
-                          {typeof slide.maxHpfCount === "number" && ` · ${slide.maxHpfCount}/HPF`}
                         </Badge>
+                      ) : (
+                        <Badge variant="outline" className="text-slate-400">PENDING</Badge>
+                      )}
+                    </TableCell>
+                    <TableCell className="hidden lg:table-cell font-mono text-sm">
+                      {isDone(slide) && typeof slide.maxHpfCount === "number" ? (
+                        <span className={slide.maxHpfCount >= 15 ? "text-red-600 font-bold" : "text-slate-600"}>
+                          {slide.maxHpfCount}
+                        </span>
                       ) : "—"}
                     </TableCell>
                     <TableCell className="text-right">
@@ -273,12 +315,12 @@ export default function DashboardPage() {
                         <DropdownMenuContent align="end">
                           <DropdownMenuLabel>Действия</DropdownMenuLabel>
                           <DropdownMenuItem
-                            onClick={() => router.push(`/viewer/${slide.id}`)}
+                            onClick={() => openViewer(slide)}
                             disabled={!isDone(slide)}>
                             <Eye className="mr-2 h-4 w-4" />Открыть просмотрщик
                           </DropdownMenuItem>
                           <DropdownMenuItem
-                            disabled={!isDone(slide) || !slide.reportReady}
+                            disabled={!isDone(slide)}
                             onClick={() => handleDownloadPdf(slide)}>
                             <Download className="mr-2 h-4 w-4" />Скачать отчёт PDF
                           </DropdownMenuItem>

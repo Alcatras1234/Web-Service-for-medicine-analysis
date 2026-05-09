@@ -50,3 +50,7 @@ jwt:
 
 inference:
   url: http://inference:8500
+
+# E4: локальный кэш скачанных WSI для tile-сервиса. На него ходит BioFormats.
+wsi:
+  cache-dir: /tmp/wsi-cache

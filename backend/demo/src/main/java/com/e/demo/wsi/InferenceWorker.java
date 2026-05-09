@@ -1,9 +1,13 @@
 package com.e.demo.wsi;
 
 import com.e.demo.dto.PatchInferenceEvent;
+import com.e.demo.entity.Job;
 import com.e.demo.entity.PatchTask;
+import com.e.demo.entity.Slide;
 import com.e.demo.repository.JobRepository;
 import com.e.demo.repository.PatchTaskRepository;
+import com.e.demo.repository.SlideRepository;
+import com.e.demo.server.DetectionStore;
 import com.e.demo.server.ReportService;
 import io.minio.GetObjectArgs;
 import io.minio.MinioClient;
@@ -30,13 +34,16 @@ public class InferenceWorker {
     private static final int PATCH_STRIDE   = 424;
     private static final int OVERLAP_PX     = PATCH_WSI_SIZE - PATCH_STRIDE;
     private static final int MODEL_SIZE     = 448;
-    private static final int HPF_WINDOW_PX  = 2144;
-    private static final int HPF_STEP_PX    = 500;
+    // HPF (high power field) по клиническому стандарту EoE: площадь 0.3 мм².
+    // Сторона квадратного окна = sqrt(0.3) ≈ 0.5477 мм.
+    private static final double HPF_AREA_MM2 = 0.3;
 
     private final MinioClient         minioClient;
     private final PatchTaskRepository patchTaskRepository;
     private final JobRepository       jobRepository;
+    private final SlideRepository     slideRepository;
     private final InferenceHttpClient inferenceClient;
+    private final DetectionStore      detectionStore;
     private final ReportService       reportService;
 
     @Value("${minio.bucketName}")
@@ -46,59 +53,145 @@ public class InferenceWorker {
         @Qualifier("internalClient") MinioClient minioClient,
         PatchTaskRepository patchTaskRepository,
         JobRepository jobRepository,
+        SlideRepository slideRepository,
         InferenceHttpClient inferenceClient,
+        DetectionStore detectionStore,
         ReportService reportService
     ) {
         this.minioClient         = minioClient;
         this.patchTaskRepository = patchTaskRepository;
         this.jobRepository       = jobRepository;
+        this.slideRepository     = slideRepository;
         this.inferenceClient     = inferenceClient;
+        this.detectionStore      = detectionStore;
         this.reportService       = reportService;
     }
 
-    @RabbitListener(queues = "patches.inference", concurrency = "4")
-    public void handle(PatchInferenceEvent event) {
-        Path tmp = null;
-        try {
-            tmp = Files.createTempFile("patch-", ".png");
-            downloadToFile(event.s3Path(), tmp);
-            BufferedImage img = ImageIO.read(tmp.toFile());
+    /** HPF-окно в пикселях по реальному MPP слайда (E1). */
+    private int hpfWindowPx(UUID jobId) {
+        Job job = jobRepository.findById(jobId).orElse(null);
+        if (job == null) return 2191; // safe fallback ≈ 0.3 мм² при mpp=0.25
+        Slide slide = slideRepository.findById(job.getSlideId()).orElse(null);
+        double mpp = (slide != null && slide.getMppX() != null && slide.getMppX() > 0)
+                ? slide.getMppX()
+                : BioFormatsWsiReader.DEFAULT_MPP;
+        double sideMm = Math.sqrt(HPF_AREA_MM2);            // мм
+        double sideUm = sideMm * 1000.0;                    // µm
+        return (int) Math.round(sideUm / mpp);              // px
+    }
 
-            PatchTask task = patchTaskRepository.findById(event.patchId()).orElseThrow();
-            int patchX = task.getX();
-            int patchY = task.getY();
+    /**
+     * E3: батч-листенер. Получает до 16 событий за раз (см. RabbitMQConfig.batchInferenceFactory),
+     * скачивает все патчи, шлёт ОДИН HTTP /infer_batch вместо N.
+     */
+    @RabbitListener(queues = "patches.inference", containerFactory = "batchInferenceFactory")
+    public void handleBatch(List<PatchInferenceEvent> events) {
+        if (events == null || events.isEmpty()) return;
 
-            boolean edgeLeft   = patchX == 0;
-            boolean edgeTop    = patchY == 0;
-            boolean edgeRight  = !patchTaskRepository
-                .existsByJobIdAndXAndY(event.jobId(), patchX + PATCH_STRIDE, patchY);
-            boolean edgeBottom = !patchTaskRepository
-                .existsByJobIdAndXAndY(event.jobId(), patchX, patchY + PATCH_STRIDE);
-
-            // Отправляем RGB HWC uint8 байты (как в оригинальном питоновском коде)
-            byte[] tensor = toRgbHWC(img, MODEL_SIZE, MODEL_SIZE);
-
-            InferenceHttpClient.InferResult result = inferenceClient.infer(
-                tensor, PATCH_WSI_SIZE, OVERLAP_PX,
-                edgeLeft, edgeTop, edgeRight, edgeBottom
-            );
-
-            log.info("Patch {} ({},{}) → total={} valid={}",
-                event.patchId(), patchX, patchY,
-                result.totalCount(), result.validCount());
-
-            savePatchResult(event.patchId(), "DONE", result.validCount(), result.totalCount());
-
-        } catch (Exception e) {
-            log.error("Inference failed: patch={}", event.patchId(), e);
-            savePatchResult(event.patchId(), "FAILED", 0, 0);
-        } finally {
-            if (tmp != null) {
-                try { Files.deleteIfExists(tmp); } catch (IOException ignored) {}
-            }
+        // jobId одинаковый для всех патчей одного слайда — но на всякий случай группируем
+        Map<UUID, List<PatchInferenceEvent>> byJob = new HashMap<>();
+        for (PatchInferenceEvent e : events) {
+            byJob.computeIfAbsent(e.jobId(), k -> new ArrayList<>()).add(e);
         }
 
-        checkAndFinalizeJob(event.jobId());
+        for (Map.Entry<UUID, List<PatchInferenceEvent>> entry : byJob.entrySet()) {
+            processJobBatch(entry.getKey(), entry.getValue());
+        }
+
+        // Финализация — один раз на каждый затронутый job
+        byJob.keySet().forEach(this::checkAndFinalizeJob);
+    }
+
+    private void processJobBatch(UUID jobId, List<PatchInferenceEvent> events) {
+        List<Path> tmps = new ArrayList<>(events.size());
+        List<InferenceHttpClient.PatchItemDto> items = new ArrayList<>(events.size());
+        Map<String, UUID> patchIdMap = new HashMap<>();   // patch_id -> task.id
+        List<UUID> failed = new ArrayList<>();
+
+        try {
+            for (PatchInferenceEvent ev : events) {
+                Path tmp = null;
+                try {
+                    tmp = Files.createTempFile("patch-", ".png");
+                    downloadToFile(ev.s3Path(), tmp);
+                    BufferedImage img = ImageIO.read(tmp.toFile());
+
+                    PatchTask task = patchTaskRepository.findById(ev.patchId()).orElseThrow();
+                    int patchX = task.getX();
+                    int patchY = task.getY();
+
+                    boolean edgeLeft   = patchX == 0;
+                    boolean edgeTop    = patchY == 0;
+                    boolean edgeRight  = !patchTaskRepository
+                        .existsByJobIdAndXAndY(ev.jobId(), patchX + PATCH_STRIDE, patchY);
+                    boolean edgeBottom = !patchTaskRepository
+                        .existsByJobIdAndXAndY(ev.jobId(), patchX, patchY + PATCH_STRIDE);
+
+                    byte[] tensor = toRgbHWC(img, MODEL_SIZE, MODEL_SIZE);
+                    String b64 = Base64.getEncoder().encodeToString(tensor);
+                    String pid = ev.patchId().toString();
+
+                    items.add(new InferenceHttpClient.PatchItemDto(
+                        pid, b64, PATCH_WSI_SIZE, OVERLAP_PX,
+                        edgeLeft, edgeTop, edgeRight, edgeBottom
+                    ));
+                    patchIdMap.put(pid, ev.patchId());
+                    tmps.add(tmp);
+                    tmp = null;
+                } catch (Exception e) {
+                    log.error("Patch prep failed: {}", ev.patchId(), e);
+                    failed.add(ev.patchId());
+                } finally {
+                    if (tmp != null) {
+                        try { Files.deleteIfExists(tmp); } catch (IOException ignored) {}
+                    }
+                }
+            }
+
+            if (!items.isEmpty()) {
+                try {
+                    InferenceHttpClient.BatchResponse resp = inferenceClient.inferBatch(items);
+                    // E6: фиксируем версию модели (только если ещё не записана)
+                    Job j = jobRepository.findById(jobId).orElse(null);
+                    if (j != null && j.getModelVersion() == null) {
+                        jobRepository.updateModelVersion(jobId, resp.modelVersion());
+                    }
+                    Set<UUID> handled = new HashSet<>();
+                    for (InferenceHttpClient.InferResult r : resp.results()) {
+                        UUID pid = patchIdMap.get(r.patchId());
+                        if (pid == null) continue;
+                        savePatchResult(pid, "DONE", r.validCount(), r.totalCount());
+                        // E6: пишем глобальные координаты детекций в MinIO
+                        if (r.detections() != null && !r.detections().isEmpty()) {
+                            PatchTask pt = patchTaskRepository.findById(pid).orElse(null);
+                            if (pt != null) {
+                                detectionStore.savePatchDetections(
+                                    jobId, pid, pt.getX(), pt.getY(), r.detections());
+                            }
+                        }
+                        handled.add(pid);
+                    }
+                    // Те, что отправили, но в ответе не пришли — помечаем FAILED
+                    for (UUID pid : patchIdMap.values()) {
+                        if (!handled.contains(pid)) failed.add(pid);
+                    }
+                    log.info("Batch inference: job={} model={} sent={} ok={} failed={}",
+                        jobId, resp.modelVersion(), items.size(), handled.size(),
+                        items.size() - handled.size());
+                } catch (Exception e) {
+                    log.error("Batch inference HTTP failed: job={} size={}", jobId, items.size(), e);
+                    failed.addAll(patchIdMap.values());
+                }
+            }
+
+            for (UUID pid : failed) {
+                savePatchResult(pid, "FAILED", 0, 0);
+            }
+        } finally {
+            for (Path p : tmps) {
+                try { Files.deleteIfExists(p); } catch (IOException ignored) {}
+            }
+        }
     }
 
     private void savePatchResult(UUID patchId, String status, int validCount, int totalCount) {
@@ -113,7 +206,7 @@ public class InferenceWorker {
 
     private void checkAndFinalizeJob(UUID jobId) {
         long notDone = patchTaskRepository.countByJobIdAndStatusNotIn(
-            jobId, List.of("DONE", "FAILED"));
+            jobId, List.of("DONE", "FAILED", "SKIPPED_WHITE"));
         if (notDone != 0) return;
 
         int updated = jobRepository.tryFinalizeJob(
@@ -127,33 +220,16 @@ public class InferenceWorker {
         long failed          = patchTaskRepository.countByJobIdAndStatus(jobId, "FAILED");
         List<PatchTask> done = patchTaskRepository.findByJobIdAndStatus(jobId, "DONE");
 
-        int maxHpfCount = 0, maxHpfX = 0, maxHpfY = 0;
-        if (!done.isEmpty()) {
-            int maxWSI_X = done.stream()
-                .mapToInt(p -> p.getX() + PATCH_WSI_SIZE).max().orElse(0);
-            int maxWSI_Y = done.stream()
-                .mapToInt(p -> p.getY() + PATCH_WSI_SIZE).max().orElse(0);
-
-            for (int wy = 0; wy < maxWSI_Y; wy += HPF_STEP_PX) {
-                for (int wx = 0; wx < maxWSI_X; wx += HPF_STEP_PX) {
-                    int wx2 = wx + HPF_WINDOW_PX;
-                    int wy2 = wy + HPF_WINDOW_PX;
-                    int windowCount = 0;
-                    for (PatchTask p : done) {
-                        int px2 = p.getX() + PATCH_WSI_SIZE;
-                        int py2 = p.getY() + PATCH_WSI_SIZE;
-                        if (p.getX() < wx2 && px2 > wx && p.getY() < wy2 && py2 > wy) {
-                            windowCount += p.getEosinophilCount();
-                        }
-                    }
-                    if (windowCount > maxHpfCount) {
-                        maxHpfCount = windowCount;
-                        maxHpfX = wx;
-                        maxHpfY = wy;
-                    }
-                }
-            }
-        }
+        // E2: integral image — O(N) поиск окна максимальной плотности
+        int hpfWindow = hpfWindowPx(jobId);
+        long t0 = System.currentTimeMillis();
+        HpfFinder.HpfResult hpf = HpfFinder.find(done, PATCH_STRIDE, hpfWindow);
+        long dt = System.currentTimeMillis() - t0;
+        int maxHpfCount = hpf.count();
+        int maxHpfX = hpf.x();
+        int maxHpfY = hpf.y();
+        log.info("HPF search: job={} patches={} window={}px result={} @ ({},{}) in {}ms",
+            jobId, done.size(), hpfWindow, maxHpfCount, maxHpfX, maxHpfY, dt);
 
         String diagnosis = maxHpfCount >= 15 ? "POSITIVE" : "NEGATIVE";
         String status    = failed > 0 ? "DONE_WITH_ERRORS" : "DONE";
@@ -162,8 +238,20 @@ public class InferenceWorker {
             jobId, status, totalCount, maxHpfCount, maxHpfX, maxHpfY,
             diagnosis, Instant.now());
 
-        log.info("Job {} DONE — total={} peakHPF={} @ ({},{}) diagnosis={}",
-            jobId, totalCount, maxHpfCount, maxHpfX, maxHpfY, diagnosis);
+        // E6/E8: индекс детекций. Собираем имена файлов всех патчей с детекциями.
+        List<String> detectionKeys = new ArrayList<>();
+        for (PatchTask p : done) {
+            if (p.getEosinophilCount() != null && p.getEosinophilCount() > 0) {
+                detectionKeys.add("detections/%s/patch_%s.json".formatted(jobId, p.getId()));
+            }
+        }
+        if (!detectionKeys.isEmpty()) {
+            String idxKey = detectionStore.writeIndex(jobId, detectionKeys);
+            if (idxKey != null) jobRepository.updateDetectionsPath(jobId, idxKey);
+        }
+
+        log.info("Job {} DONE — total={} peakHPF={} @ ({},{}) diagnosis={} detections={}",
+            jobId, totalCount, maxHpfCount, maxHpfX, maxHpfY, diagnosis, detectionKeys.size());
 
         reportService.generateAsync(jobId);
     }

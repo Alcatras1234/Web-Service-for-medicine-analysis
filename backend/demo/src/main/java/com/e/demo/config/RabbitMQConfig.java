@@ -1,6 +1,7 @@
 package com.e.demo.config;
 
 import org.springframework.amqp.core.*;
+import org.springframework.amqp.rabbit.config.SimpleRabbitListenerContainerFactory;
 import org.springframework.amqp.rabbit.connection.ConnectionFactory;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.amqp.support.converter.Jackson2JsonMessageConverter;
@@ -71,5 +72,26 @@ public class RabbitMQConfig {
         RabbitTemplate template = new RabbitTemplate(connectionFactory);
         template.setMessageConverter(messageConverter());
         return template;
+    }
+
+    /**
+     * E3: батч-фабрика для patches.inference.
+     * Слушатель получает List<PatchInferenceEvent> размером до 16 штук
+     * (или меньше, если очередь опустела за receive-timeout).
+     */
+    @Bean
+    public SimpleRabbitListenerContainerFactory batchInferenceFactory(
+            ConnectionFactory connectionFactory) {
+        SimpleRabbitListenerContainerFactory factory = new SimpleRabbitListenerContainerFactory();
+        factory.setConnectionFactory(connectionFactory);
+        factory.setMessageConverter(messageConverter());
+        factory.setBatchListener(true);
+        factory.setConsumerBatchEnabled(true);
+        factory.setBatchSize(16);
+        factory.setReceiveTimeout(500L);     // флаш неполного батча через 500мс
+        factory.setConcurrentConsumers(2);
+        factory.setMaxConcurrentConsumers(4);
+        factory.setPrefetchCount(32);
+        return factory;
     }
 }

@@ -80,6 +80,12 @@ if ch is not None and ch not in (expected_detect, expected_seg):
 
 CLASS_NAMES = {0: "eos", 1: "eosg"}
 
+# E6: версия модели — отдаём её клиенту в каждом ответе для аудита
+MODEL_VERSION = os.environ.get(
+    "MODEL_VERSION",
+    f"yolo11s-seg/{os.path.basename(MODEL_PATH)}"
+)
+
 # Однопоточный executor для GPU инференса — гарантирует, что в один и тот же
 # момент только один тред работает с CUDA stream сессии.
 GPU_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ort-gpu")
@@ -216,6 +222,7 @@ def apply_overlap_filter(dets: list, meta) -> dict:
     hi_x = meta.patch_wsi_size - half_ov
     hi_y = meta.patch_wsi_size - half_ov
     eos_count = eosg_count = valid_eos = valid_eosg = 0
+    valid_dets = []  # E6: координаты валидных детекций для overlay/audit
     for d in dets:
         name = CLASS_NAMES.get(d["cls_id"], "unknown")
         if name == "eos":   eos_count += 1
@@ -223,12 +230,20 @@ def apply_overlap_filter(dets: list, meta) -> dict:
         if lo_x <= d["cx"] <= hi_x and lo_y <= d["cy"] <= hi_y:
             if name == "eos":   valid_eos += 1
             elif name == "eosg": valid_eosg += 1
+            valid_dets.append({
+                "cls": name,
+                "cx": d["cx"], "cy": d["cy"],
+                "x1": d["x1"], "y1": d["y1"],
+                "x2": d["x2"], "y2": d["y2"],
+                "conf": d["conf"],
+            })
     return {
         "patch_id":    getattr(meta, "patch_id", "single"),
         "total_count": eos_count + eosg_count,
         "valid_count": valid_eos + valid_eosg,
         "valid_eos":   valid_eos,
         "valid_eosg":  valid_eosg,
+        "detections":  valid_dets,
     }
 
 
@@ -299,6 +314,8 @@ async def infer_raw(req: TensorRequest):
 @app.post("/infer_batch")
 async def infer_batch(req: BatchTensorRequest):
     results = []
+    # E6: версия модели прикладывается к ответу для аудита
+    out = {"model_version": MODEL_VERSION, "results": results}
     for patch in req.patches:
         raw = base64.b64decode(patch.tensor_base64)
         hwc = np.frombuffer(raw, dtype=np.uint8).reshape(
@@ -319,7 +336,7 @@ async def infer_batch(req: BatchTensorRequest):
             continue
         dets = run_nms(output)
         results.append(apply_overlap_filter(dets, patch))
-    return {"results": results}
+    return out
 
 
 @app.post("/debug_raw")
