@@ -1,0 +1,32 @@
+# ML модели — не храним в git, они тяжёлые
+*.onnx
+*.pt
+*.pth
+*.h5
+*.tflite
+*.pb
+
+# Возможные пути моделей
+backend/inference-service/triton-models/**/*.onnx
+backend/triton-models/**/*.onnx
+
+# Python virtualenv (был случайно закоммичен)
+backend/inference-venv/
+
+# WSI кеш
+wsi-cache/
+backend/wsi-cache/
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Build артефакты
+backend/demo/target/
+frontend/my-app/.next/
+frontend/my-app/node_modules/
+**/node_modules/
+*.class
+*.jar
