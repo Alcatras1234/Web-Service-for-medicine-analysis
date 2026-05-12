@@ -48,8 +48,11 @@ export default function LoginPage() {
 
       const data: { token: string; email: string; role: string } = await response.json()
 
-      // Сохраняем токен в cookie — middleware его читает
-      document.cookie = `token=${data.token}; path=/; max-age=86400; SameSite=Lax`
+      // Кука уже поставлена сервером через Set-Cookie в /api/auth/login (там корректные
+      // атрибуты, в т.ч. Secure для HTTPS). Дублируем через JS только для подстраховки —
+      // и тоже с Secure на HTTPS, иначе браузеры на ngrok-домене могут не принять.
+      const isHttps = typeof window !== "undefined" && window.location.protocol === "https:"
+      document.cookie = `token=${data.token}; path=/; max-age=86400; SameSite=Lax${isHttps ? "; Secure" : ""}`
 
       // Сохраняем в localStorage — клиентские компоненты читают через authHeader()
       localStorage.setItem("token", data.token)
@@ -86,7 +89,7 @@ export default function LoginPage() {
         </CardHeader>
 
         <CardContent className="space-y-4 pt-4">
-          <form onSubmit={handleLogin} className="space-y-4">
+          <form onSubmit={handleLogin} method="POST" action="#" className="space-y-4">
 
             {/* Блок ошибки */}
             {error && (

@@ -137,3 +137,11 @@ CREATE TABLE audit_events (
 
 CREATE INDEX idx_audit_entity ON audit_events(entity_type, entity_id);
 CREATE INDEX idx_audit_user_action ON audit_events(user_id, action);
+
+-- §3.2: раздельный учёт intact (для PEC по EoE consensus) и granulated эозинофилов
+ALTER TABLE patch_tasks
+  ADD COLUMN eos_intact      INTEGER NOT NULL DEFAULT 0,
+  ADD COLUMN eos_granulated  INTEGER NOT NULL DEFAULT 0;
+
+ALTER TABLE jobs
+  ADD COLUMN max_hpf_intact INTEGER NOT NULL DEFAULT 0;

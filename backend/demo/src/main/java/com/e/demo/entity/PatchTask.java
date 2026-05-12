@@ -27,9 +27,17 @@ public class PatchTask {
     @Column(nullable = false)
     private String status = "PENDING";
 
-    // Результат инференса
+    // Результат инференса. eosinophilCount = intact + granulated (для обратной совместимости).
     @Column(name = "eosinophil_count")
     private Integer eosinophilCount = 0;
+
+    /** §3.2: intact (целые) эозинофилы — только эти учитываются в PEC по EoE consensus. */
+    @Column(name = "eos_intact")
+    private Integer eosIntact = 0;
+
+    /** §3.2: granulated / разрушенные — служебная метрика, в PEC не входит. */
+    @Column(name = "eos_granulated")
+    private Integer eosGranulated = 0;
 
     private int attempts;
 

@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react"
 import { useParams } from "next/navigation"
 import Link from "next/link"
+import { attachScaleBar } from "@/components/viewer/ScaleBar"
 
 type SlideInfo = {
   slideId: number
@@ -67,24 +68,86 @@ export default function StandaloneViewerPage() {
         },
       })
 
+      // §5.3: масштабная линейка
+      const detachScale = attachScaleBar(viewerRef.current, i.mppX, containerRef.current)
+      ;(viewerRef.current as any).__detachScale = detachScale
+
       if (d && d.maxHpfCount > 0 && i.mppX) {
         const win = Math.round(Math.sqrt(0.3) * 1000 / i.mppX)
         const overlay = document.createElement("div")
-        overlay.style.border = "3px solid red"
-        overlay.style.boxShadow = "0 0 12px rgba(255,0,0,0.6)"
-        overlay.title = `HPF max: ${d.maxHpfCount} eos`
+        overlay.style.border = "4px solid #ff2030"
+        overlay.style.boxShadow = "0 0 18px rgba(255,30,40,0.85), inset 0 0 12px rgba(255,30,40,0.4)"
+        overlay.style.animation = "hpf-pulse 1.6s ease-in-out infinite"
+        overlay.title = `HPF max: ${d.maxHpfCount} эозинофилов`
+
+        // CSS keyframes — один раз
+        if (!document.getElementById("hpf-pulse-style")) {
+          const style = document.createElement("style")
+          style.id = "hpf-pulse-style"
+          style.textContent = `
+            @keyframes hpf-pulse {
+              0%, 100% { box-shadow: 0 0 18px rgba(255,30,40,0.85), inset 0 0 12px rgba(255,30,40,0.4); }
+              50%      { box-shadow: 0 0 28px rgba(255,30,40,1.0),  inset 0 0 20px rgba(255,30,40,0.6); }
+            }
+          `
+          document.head.appendChild(style)
+        }
+
         viewerRef.current.addOverlay({
           element: overlay,
           location: viewerRef.current.viewport.imageToViewportRectangle(
             d.maxHpfX, d.maxHpfY, win, win
           ),
         })
+
+        // Автоцентр на HPF max после первой загрузки
+        viewerRef.current.addOnceHandler("open", () => {
+          const rect = viewerRef.current.viewport.imageToViewportRectangle(
+            d.maxHpfX - win, d.maxHpfY - win, win * 3, win * 3
+          )
+          viewerRef.current.viewport.fitBounds(rect, true)
+        })
+
+        // Если детекций немного — сразу показать overlay точек
+        try {
+          const dRes = await fetch(`/api/slides/${slideId}/detections/full`)
+          if (dRes.ok) {
+            const dData = await dRes.json()
+            if ((dData.detections || []).length > 0 && (dData.detections || []).length < 5000) {
+              autoShowDetections(dData.detections, viewerRef.current)
+              setShowOverlay(true)
+            }
+          }
+        } catch {}
       }
+    }
+
+    function autoShowDetections(dets: any[], v: any) {
+      const r = 6
+      dets.forEach(d => {
+        const dot = document.createElement("div")
+        dot.dataset.detection = "1"
+        dot.style.width = "10px"
+        dot.style.height = "10px"
+        dot.style.borderRadius = "50%"
+        dot.style.background = d.cls === "eos" ? "rgba(255,80,80,0.8)" : "rgba(255,200,0,0.8)"
+        dot.style.border = "1px solid white"
+        dot.style.cursor = "help"
+        // §5.3: tooltip с классом и confidence
+        const conf = typeof d.conf === "number" ? d.conf.toFixed(2) : "—"
+        const clsLabel = d.cls === "eos" ? "intact" : (d.cls === "eosg" ? "granulated" : d.cls)
+        dot.title = `${clsLabel}  ·  conf ${conf}  ·  (${Math.round(d.cx)}, ${Math.round(d.cy)}) px`
+        v.addOverlay({
+          element: dot,
+          location: v.viewport.imageToViewportRectangle(d.cx - r, d.cy - r, r * 2, r * 2),
+        })
+      })
     }
 
     init()
     return () => {
       cancelled = true
+      try { (viewerRef.current as any)?.__detachScale?.() } catch {}
       viewerRef.current?.destroy?.()
     }
   }, [slideId])
@@ -112,7 +175,7 @@ export default function StandaloneViewerPage() {
       const res = await fetch(`/api/slides/${slideId}/detections/full`)
       if (!res.ok) return
       const data = await res.json()
-      const dets: { cls: string; cx: number; cy: number }[] = data.detections || []
+      const dets: { cls: string; cx: number; cy: number; conf?: number }[] = data.detections || []
       const MAX_OVERLAY = 5000
       const sample = dets.length > MAX_OVERLAY
         ? dets.filter((_, i) => i % Math.ceil(dets.length / MAX_OVERLAY) === 0)
@@ -126,6 +189,10 @@ export default function StandaloneViewerPage() {
         dot.style.borderRadius = "50%"
         dot.style.background = d.cls === "eos" ? "rgba(255,80,80,0.7)" : "rgba(255,200,0,0.7)"
         dot.style.border = "1px solid white"
+        dot.style.cursor = "help"
+        const conf = typeof d.conf === "number" ? d.conf.toFixed(2) : "—"
+        const clsLabel = d.cls === "eos" ? "intact" : (d.cls === "eosg" ? "granulated" : d.cls)
+        dot.title = `${clsLabel}  ·  conf ${conf}  ·  (${Math.round(d.cx)}, ${Math.round(d.cy)}) px`
         v.addOverlay({
           element: dot,
           location: v.viewport.imageToViewportRectangle(d.cx - r, d.cy - r, r * 2, r * 2),

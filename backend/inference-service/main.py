@@ -58,25 +58,35 @@ def _build_session() -> ort.InferenceSession:
 
 sess = _build_session()
 input_name  = sess.get_inputs()[0].name
-output_name = sess.get_outputs()[0].name  # detect head
-out_shape   = sess.get_outputs()[0].shape
+det_output_name = sess.get_outputs()[0].name           # detect head
+out_shape       = sess.get_outputs()[0].shape
+all_outputs     = [o.name for o in sess.get_outputs()]
 logger.info(f"ONNX input  {input_name} shape={sess.get_inputs()[0].shape}")
-logger.info(f"ONNX output {output_name} shape={out_shape} (всего выходов: "
-            f"{len(sess.get_outputs())})")
+logger.info(f"ONNX outputs: {all_outputs} (head shape={out_shape})")
 
-# Sanity check: проверим, что модель — на правильное число классов.
-# YOLO detect head: (4 + nc, anchors). YOLO seg head: (4 + nc + 32, anchors).
+# §3.1: определяем тип модели — detect (4+nc каналов) или seg (4+nc+32 + второй output с proto-масками)
 expected_detect = 4 + NUM_CLASSES
 expected_seg    = 4 + NUM_CLASSES + 32
 ch = out_shape[1] if isinstance(out_shape[1], int) else None
-if ch is not None and ch not in (expected_detect, expected_seg):
-    logger.warning(
-        f"!!! ONNX output channels = {ch}, ожидали {expected_detect} (detect) "
-        f"или {expected_seg} (seg) для NUM_CLASSES={NUM_CLASSES}. "
-        f"Скорее всего в best.onnx лежит pretrained модель на COCO (80 классов). "
-        f"Перевыгрузите дообученную модель в ONNX через `model.export(format='onnx')` "
-        f"из чекпоинта вашего fine-tune."
-    )
+
+IS_SEG_MODEL = (ch == expected_seg) and (len(sess.get_outputs()) >= 2)
+proto_output_name = None
+if IS_SEG_MODEL:
+    proto_output_name = sess.get_outputs()[1].name
+    proto_shape = sess.get_outputs()[1].shape
+    logger.info(f"✓ SEGMENTATION MODEL detected. Proto output '{proto_output_name}' shape={proto_shape}. "
+                f"Подсчёт через маски + connected components.")
+else:
+    if ch == expected_detect:
+        logger.info(f"✓ DETECTION-only model. Подсчёт по bbox (после NMS).")
+    else:
+        logger.warning(
+            f"!!! ONNX output channels = {ch}, ожидали {expected_detect} (detect) "
+            f"или {expected_seg} (seg) для NUM_CLASSES={NUM_CLASSES}. "
+            f"Скорее всего в best.onnx лежит pretrained модель на COCO (80 классов). "
+            f"Перевыгрузите дообученную модель через `model.export(format='onnx')` "
+            f"из чекпоинта вашего fine-tune."
+        )
 
 CLASS_NAMES = {0: "eos", 1: "eosg"}
 
@@ -95,14 +105,16 @@ _session_lock = asyncio.Lock()
 
 def _maybe_recreate_session(err: Exception):
     """После CUDA-700 контекст драйвера отравлен — пересоздаём сессию."""
-    global sess, input_name, output_name
+    global sess, input_name, det_output_name, proto_output_name
     msg = str(err)
     if "CUDA" in msg or "cudnn" in msg or "illegal memory access" in msg:
         logger.error("CUDA error detected, recreating ORT session...")
         try:
             sess = _build_session()
             input_name  = sess.get_inputs()[0].name
-            output_name = sess.get_outputs()[0].name
+            det_output_name = sess.get_outputs()[0].name
+            if IS_SEG_MODEL and len(sess.get_outputs()) >= 2:
+                proto_output_name = sess.get_outputs()[1].name
             logger.info("ORT session recreated")
         except Exception as e:
             logger.exception(f"Failed to recreate session: {e}")
@@ -161,26 +173,36 @@ def _sigmoid(x: np.ndarray) -> np.ndarray:
     return 1.0 / (1.0 + np.exp(-np.clip(x, -88, 88)))
 
 
-def run_nms(output: np.ndarray) -> list:
-    # output: (1, 4+nc[+32], anchors). Берём только detect-часть.
-    preds = output[0]
-    coords = preds[:4, :].T            # (anchors, 4) xywh в пикселях входа
-    scores = preds[4:4 + NUM_CLASSES]  # (nc, anchors) — берём ТОЛЬКО classes,
-                                       # не mask coefficients
+def run_nms(output: np.ndarray, proto: np.ndarray = None) -> list:
+    """
+    Возвращает список детекций. У seg-модели каждая детекция содержит
+    bbox (от YOLO) + connected-components count внутри её маски (для разделения
+    слипшихся клеток в одном bbox'е).
+
+    output: (1, 4+nc[+32], anchors). Берём только detect-часть для NMS.
+    proto:  (1, 32, mh, mw) — proto-маски, только если seg-модель.
+    """
+    preds = output[0]                    # (4+nc[+32], anchors)
+    coords = preds[:4, :].T              # (anchors, 4) xywh
+    scores = preds[4:4 + NUM_CLASSES]    # (nc, anchors)
 
     if scores.size == 0:
         return []
-
     if scores.max() > 1.0:
         scores = _sigmoid(scores)
 
     cls_ids    = scores.argmax(axis=0)
     cls_scores = scores.max(axis=0)
 
-    mask = cls_scores > CONF_THRESH
-    coords  = coords[mask]
-    cls_ids = cls_ids[mask]
-    confs   = cls_scores[mask]
+    has_masks = IS_SEG_MODEL and proto is not None and preds.shape[0] >= 4 + NUM_CLASSES + 32
+    mask_coefs = preds[4 + NUM_CLASSES:4 + NUM_CLASSES + 32].T if has_masks else None  # (anchors, 32)
+
+    mask_above = cls_scores > CONF_THRESH
+    coords  = coords[mask_above]
+    cls_ids = cls_ids[mask_above]
+    confs   = cls_scores[mask_above]
+    if has_masks:
+        mask_coefs = mask_coefs[mask_above]
     if len(coords) == 0:
         return []
 
@@ -197,6 +219,8 @@ def run_nms(output: np.ndarray) -> list:
     x1, y1, x2, y2 = x1[valid], y1[valid], x2[valid], y2[valid]
     cls_ids = cls_ids[valid]
     confs   = confs[valid]
+    if has_masks:
+        mask_coefs = mask_coefs[valid]
     if len(x1) == 0:
         return []
 
@@ -206,36 +230,100 @@ def run_nms(output: np.ndarray) -> list:
     if len(indices) == 0:
         return []
 
-    return [{
-        "cls_id": int(cls_ids[int(i)]),
-        "cx":   float((x1[int(i)] + x2[int(i)]) / 2),
-        "cy":   float((y1[int(i)] + y2[int(i)]) / 2),
-        "x1":   float(x1[int(i)]), "y1": float(y1[int(i)]),
-        "x2":   float(x2[int(i)]), "y2": float(y2[int(i)]),
-        "conf": float(confs[int(i)]),
-    } for i in indices]
+    # ── §3.1: connected components на masks для split'a слипшихся клеток ──────
+    cc_per_det = None
+    if has_masks:
+        cc_per_det = _compute_cc_counts(
+            proto, mask_coefs, [int(i) for i in indices],
+            x1, y1, x2, y2, INPUT_SIZE
+        )
+
+    out = []
+    for k, i in enumerate(indices):
+        ii = int(i)
+        det = {
+            "cls_id": int(cls_ids[ii]),
+            "cx":   float((x1[ii] + x2[ii]) / 2),
+            "cy":   float((y1[ii] + y2[ii]) / 2),
+            "x1":   float(x1[ii]), "y1": float(y1[ii]),
+            "x2":   float(x2[ii]), "y2": float(y2[ii]),
+            "conf": float(confs[ii]),
+        }
+        if cc_per_det is not None:
+            det["cc"] = int(cc_per_det[k])     # сколько отдельных компонент в маске этого bbox'а
+        out.append(det)
+    return out
+
+
+def _compute_cc_counts(proto, mask_coefs_kept, kept_idx, x1, y1, x2, y2, input_size):
+    """
+    Для каждого bbox после NMS:
+      1. Строим маску = sigmoid(coefs @ proto.flatten)
+      2. Crop по bbox
+      3. Threshold > 0.5 → бинарка
+      4. cv2.connectedComponents → число отдельных клеток в маске
+    Возвращает np.array[len(kept_idx)].
+    """
+    p = proto[0]                          # (32, mh, mw)
+    nm, mh, mw = p.shape
+    proto_flat = p.reshape(nm, mh * mw).astype(np.float32)
+    sx = mw / input_size
+    sy = mh / input_size
+
+    counts = np.ones(len(kept_idx), dtype=np.int32)  # дефолт = 1 (одна клетка на bbox)
+    for k, ii in enumerate(kept_idx):
+        coefs = mask_coefs_kept[k].astype(np.float32)            # (32,)
+        m = _sigmoid(coefs @ proto_flat).reshape(mh, mw)         # (mh, mw)
+        # crop в координатах маски
+        mx1 = max(0, int(x1[ii] * sx))
+        my1 = max(0, int(y1[ii] * sy))
+        mx2 = min(mw, int(np.ceil(x2[ii] * sx)))
+        my2 = min(mh, int(np.ceil(y2[ii] * sy)))
+        if mx2 - mx1 < 2 or my2 - my1 < 2:
+            continue
+        crop = m[my1:my2, mx1:mx2]
+        binary = (crop > 0.5).astype(np.uint8)
+        if binary.sum() == 0:
+            continue
+        n_components, _ = cv2.connectedComponents(binary)
+        # cv2 возвращает кол-во компонент включая фон
+        counts[k] = max(1, n_components - 1)
+    return counts
 
 
 def apply_overlap_filter(dets: list, meta) -> dict:
+    """
+    §3.1 + §3.2: считаем клетки. Если у детекции есть `cc` (connected components
+    из маски) — это число клеток внутри bbox'а (для слипшихся скоплений > 1).
+    Если нет (detect-модель) — каждый bbox = 1 клетка.
+
+    §3.4: на внешних границах WSI overlap'a нет — у соседнего патча просто нет.
+    Поэтому inner-zone там расширяется до самого края патча, чтобы не было
+    "мёртвой зоны" по периметру слайда (~5% потерь в old-варианте).
+    """
     half_ov = meta.overlap_px / 2
-    lo_x, lo_y = half_ov, half_ov
-    hi_x = meta.patch_wsi_size - half_ov
-    hi_y = meta.patch_wsi_size - half_ov
+    lo_x = 0.0 if meta.edge_left  else half_ov
+    lo_y = 0.0 if meta.edge_top   else half_ov
+    hi_x = meta.patch_wsi_size if meta.edge_right  else meta.patch_wsi_size - half_ov
+    hi_y = meta.patch_wsi_size if meta.edge_bottom else meta.patch_wsi_size - half_ov
     eos_count = eosg_count = valid_eos = valid_eosg = 0
-    valid_dets = []  # E6: координаты валидных детекций для overlay/audit
+    valid_dets = []
     for d in dets:
         name = CLASS_NAMES.get(d["cls_id"], "unknown")
-        if name == "eos":   eos_count += 1
-        elif name == "eosg": eosg_count += 1
+        # сколько клеток приходится на эту детекцию (1 если bbox-only, >=1 если seg)
+        cells = int(d.get("cc", 1))
+        if name == "eos":   eos_count  += cells
+        elif name == "eosg": eosg_count += cells
         if lo_x <= d["cx"] <= hi_x and lo_y <= d["cy"] <= hi_y:
-            if name == "eos":   valid_eos += 1
-            elif name == "eosg": valid_eosg += 1
+            if name == "eos":   valid_eos  += cells
+            elif name == "eosg": valid_eosg += cells
             valid_dets.append({
                 "cls": name,
                 "cx": d["cx"], "cy": d["cy"],
                 "x1": d["x1"], "y1": d["y1"],
                 "x2": d["x2"], "y2": d["y2"],
                 "conf": d["conf"],
+                "cells": cells,
             })
     return {
         "patch_id":    getattr(meta, "patch_id", "single"),
@@ -248,11 +336,15 @@ def apply_overlap_filter(dets: list, meta) -> dict:
 
 
 # ── Низкоуровневый запуск, всё через GPU_EXECUTOR (1 поток) ──────────────────
-def _run_blocking(nchw: np.ndarray) -> np.ndarray:
-    return sess.run([output_name], {input_name: nchw})[0]
+def _run_blocking(nchw: np.ndarray):
+    """Возвращает (det, proto) если seg-модель, иначе (det, None)."""
+    if IS_SEG_MODEL and proto_output_name:
+        det, proto = sess.run([det_output_name, proto_output_name], {input_name: nchw})
+        return det, proto
+    return sess.run([det_output_name], {input_name: nchw})[0], None
 
 
-async def run_session(nchw: np.ndarray) -> np.ndarray:
+async def run_session(nchw: np.ndarray):
     loop = asyncio.get_event_loop()
     try:
         return await loop.run_in_executor(GPU_EXECUTOR, _run_blocking, nchw)
@@ -266,6 +358,8 @@ async def run_session(nchw: np.ndarray) -> np.ndarray:
 @app.get("/health")
 def health():
     return {"status": "ok", "model": MODEL_PATH,
+            "is_seg_model": IS_SEG_MODEL,
+            "model_version": MODEL_VERSION,
             "providers": sess.get_providers(),
             "input_shape":  sess.get_inputs()[0].shape,
             "output_shape": sess.get_outputs()[0].shape,
@@ -282,14 +376,15 @@ async def infer(req: InferRequest):
     resized = cv2.resize(img_rgb, (INPUT_SIZE, INPUT_SIZE))
     nchw = preprocess_hwc(resized)
     try:
-        output = await run_session(nchw)
+        det, proto = await run_session(nchw)
     except Exception as e:
         raise HTTPException(500, f"Inference failed: {e}")
-    dets = run_nms(output)
-    return {"eosinophil_count": len(dets),
+    dets = run_nms(det, proto)
+    total_cells = sum(int(d.get("cc", 1)) for d in dets)
+    return {"eosinophil_count": total_cells,
             "boxes": [{"x1": d["x1"], "y1": d["y1"],
                        "x2": d["x2"], "y2": d["y2"],
-                       "conf": d["conf"]} for d in dets]}
+                       "conf": d["conf"], "cells": int(d.get("cc", 1))} for d in dets]}
 
 
 @app.post("/infer_raw")
@@ -303,18 +398,17 @@ async def infer_raw(req: TensorRequest):
 
     nchw = preprocess_hwc(hwc)
     try:
-        output = await run_session(nchw)
+        det, proto = await run_session(nchw)
     except Exception as e:
         raise HTTPException(500, f"Inference failed: {e}")
 
-    dets = run_nms(output)
+    dets = run_nms(det, proto)
     return apply_overlap_filter(dets, req)
 
 
 @app.post("/infer_batch")
 async def infer_batch(req: BatchTensorRequest):
     results = []
-    # E6: версия модели прикладывается к ответу для аудита
     out = {"model_version": MODEL_VERSION, "results": results}
     for patch in req.patches:
         raw = base64.b64decode(patch.tensor_base64)
@@ -323,18 +417,20 @@ async def infer_batch(req: BatchTensorRequest):
         if float(hwc.mean()) > WHITE_THRESH:
             results.append({"patch_id": patch.patch_id,
                             "total_count": 0, "valid_count": 0,
-                            "valid_eos": 0, "valid_eosg": 0})
+                            "valid_eos": 0, "valid_eosg": 0,
+                            "detections": []})
             continue
         nchw = preprocess_hwc(hwc)
         try:
-            output = await run_session(nchw)
+            det, proto = await run_session(nchw)
         except Exception as e:
             logger.error(f"patch {patch.patch_id} failed: {e}")
             results.append({"patch_id": patch.patch_id,
                             "total_count": 0, "valid_count": 0,
-                            "valid_eos": 0, "valid_eosg": 0})
+                            "valid_eos": 0, "valid_eosg": 0,
+                            "detections": []})
             continue
-        dets = run_nms(output)
+        dets = run_nms(det, proto)
         results.append(apply_overlap_filter(dets, patch))
     return out
 
@@ -346,10 +442,12 @@ async def debug_raw(req: InferRequest):
     img_rgb = np.array(pil_img)
     resized = cv2.resize(img_rgb, (INPUT_SIZE, INPUT_SIZE))
     nchw = preprocess_hwc(resized)
-    output = await run_session(nchw)
-    scores = output[0][4:4 + NUM_CLASSES, :]
+    det, proto = await run_session(nchw)
+    scores = det[0][4:4 + NUM_CLASSES, :]
     return {
-        "output_shape":   list(output.shape),
+        "is_seg_model":   IS_SEG_MODEL,
+        "det_shape":      list(det.shape),
+        "proto_shape":    list(proto.shape) if proto is not None else None,
         "num_outputs":    len(sess.get_outputs()),
         "scores_min":     float(scores.min()),
         "scores_max":     float(scores.max()),

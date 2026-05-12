@@ -160,7 +160,9 @@ public class InferenceWorker {
                     for (InferenceHttpClient.InferResult r : resp.results()) {
                         UUID pid = patchIdMap.get(r.patchId());
                         if (pid == null) continue;
-                        savePatchResult(pid, "DONE", r.validCount(), r.totalCount());
+                        // §3.2: сохраняем раздельно intact и granulated
+                        savePatchResult(pid, "DONE", r.validCount(), r.totalCount(),
+                                r.validEos(), r.validEosg());
                         // E6: пишем глобальные координаты детекций в MinIO
                         if (r.detections() != null && !r.detections().isEmpty()) {
                             PatchTask pt = patchTaskRepository.findById(pid).orElse(null);
@@ -185,7 +187,7 @@ public class InferenceWorker {
             }
 
             for (UUID pid : failed) {
-                savePatchResult(pid, "FAILED", 0, 0);
+                savePatchResult(pid, "FAILED", 0, 0, 0, 0);
             }
         } finally {
             for (Path p : tmps) {
@@ -194,11 +196,14 @@ public class InferenceWorker {
         }
     }
 
-    private void savePatchResult(UUID patchId, String status, int validCount, int totalCount) {
+    private void savePatchResult(UUID patchId, String status, int validCount, int totalCount,
+                                 int eosIntact, int eosGranulated) {
         patchTaskRepository.findById(patchId).ifPresent(task -> {
             task.setStatus(status);
             task.setEosinophilCount(validCount);
             task.setTotalCount(totalCount);
+            task.setEosIntact(eosIntact);
+            task.setEosGranulated(eosGranulated);
             task.setUpdatedAt(Instant.now());
             patchTaskRepository.save(task);
         });
@@ -220,40 +225,92 @@ public class InferenceWorker {
         long failed          = patchTaskRepository.countByJobIdAndStatus(jobId, "FAILED");
         List<PatchTask> done = patchTaskRepository.findByJobIdAndStatus(jobId, "DONE");
 
-        // E2: integral image — O(N) поиск окна максимальной плотности
+        // §2 + §3.3: тонкий sliding-window поиск окна максимальной плотности.
+        // §3.2: диагноз ставится только по INTACT эозинофилам, как в EoE consensus.
         int hpfWindow = hpfWindowPx(jobId);
         long t0 = System.currentTimeMillis();
-        HpfFinder.HpfResult hpf = HpfFinder.find(done, PATCH_STRIDE, hpfWindow);
-        long dt = System.currentTimeMillis() - t0;
-        int maxHpfCount = hpf.count();
-        int maxHpfX = hpf.x();
-        int maxHpfY = hpf.y();
-        log.info("HPF search: job={} patches={} window={}px result={} @ ({},{}) in {}ms",
-            jobId, done.size(), hpfWindow, maxHpfCount, maxHpfX, maxHpfY, dt);
 
-        String diagnosis = maxHpfCount >= 15 ? "POSITIVE" : "NEGATIVE";
-        String status    = failed > 0 ? "DONE_WITH_ERRORS" : "DONE";
+        // 1) Находим окно, где максимум INTACT — это диагностическая позиция
+        HpfFinder.HpfResult hpfIntact = HpfFinder.findByIntact(done, PATCH_STRIDE, hpfWindow);
+        int maxHpfIntact = hpfIntact.count();
+        int maxHpfX      = hpfIntact.x();
+        int maxHpfY      = hpfIntact.y();
 
-        jobRepository.updateInferenceResult(
-            jobId, status, totalCount, maxHpfCount, maxHpfX, maxHpfY,
-            diagnosis, Instant.now());
+        // 2) Считаем total (intact+granulated) В ТОЙ ЖЕ ПОЗИЦИИ через агрегацию патчей.
+        //    Это приближённая оценка — патчи на краях окна считаются целиком.
+        int approxTotal = HpfFinder.sumAt(done, PATCH_STRIDE, hpfWindow, maxHpfX, maxHpfY,
+                p -> p.getEosinophilCount() == null ? 0 : p.getEosinophilCount());
 
-        // E6/E8: индекс детекций. Собираем имена файлов всех патчей с детекциями.
+        // E6/E8: индекс детекций. Записываем СНАЧАЛА — нужен для точного пересчёта PEC.
         List<String> detectionKeys = new ArrayList<>();
         for (PatchTask p : done) {
             if (p.getEosinophilCount() != null && p.getEosinophilCount() > 0) {
                 detectionKeys.add("detections/%s/patch_%s.json".formatted(jobId, p.getId()));
             }
         }
+        String idxKey = null;
         if (!detectionKeys.isEmpty()) {
-            String idxKey = detectionStore.writeIndex(jobId, detectionKeys);
+            idxKey = detectionStore.writeIndex(jobId, detectionKeys);
             if (idxKey != null) jobRepository.updateDetectionsPath(jobId, idxKey);
         }
 
-        log.info("Job {} DONE — total={} peakHPF={} @ ({},{}) diagnosis={} detections={}",
-            jobId, totalCount, maxHpfCount, maxHpfX, maxHpfY, diagnosis, detectionKeys.size());
+        // 3) ТОЧНЫЙ пересчёт PEC по координатам детекций в HPF-окне.
+        //    sumAt брал целые патчи на краях — поэтому завышал. Здесь же — каждая
+        //    детекция учитывается только если её (cx,cy) реально внутри окна.
+        int maxHpfCount = approxTotal;
+        if (idxKey != null) {
+            int[] exact = exactCountInWindow(idxKey, maxHpfX, maxHpfY, hpfWindow);
+            // exact[0] = intact, exact[1] = granulated
+            int exactIntact = exact[0];
+            int exactTotal  = exact[0] + exact[1];
+            log.info("HPF exact recount: approx_intact={} → exact_intact={}, approx_total={} → exact_total={}",
+                    maxHpfIntact, exactIntact, approxTotal, exactTotal);
+            maxHpfIntact = exactIntact;
+            maxHpfCount  = exactTotal;
+        }
+
+        long dt = System.currentTimeMillis() - t0;
+        log.info("HPF search: job={} patches={} window={}px intact={} total={} @ ({},{}) in {}ms",
+            jobId, done.size(), hpfWindow, maxHpfIntact, maxHpfCount, maxHpfX, maxHpfY, dt);
+
+        // §3.2: порог 15 применяется к INTACT (теперь точный)
+        String diagnosis = maxHpfIntact >= 15 ? "POSITIVE" : "NEGATIVE";
+        String status    = failed > 0 ? "DONE_WITH_ERRORS" : "DONE";
+
+        jobRepository.updateInferenceResult(
+            jobId, status, totalCount, maxHpfCount, maxHpfIntact,
+            maxHpfX, maxHpfY, diagnosis, Instant.now());
+
+        log.info("Job {} DONE — total={} peakHPF(intact)={} (sum={}) @ ({},{}) diagnosis={} detections={}",
+            jobId, totalCount, maxHpfIntact, maxHpfCount, maxHpfX, maxHpfY, diagnosis, detectionKeys.size());
 
         reportService.generateAsync(jobId);
+    }
+
+    /**
+     * Точный подсчёт клеток в HPF-окне по координатам детекций.
+     * Возвращает [intact_cells, granulated_cells] — суммы поля {@code cells}
+     * (CC от seg-маски) для детекций чьи (cx,cy) попадают в окно.
+     */
+    private int[] exactCountInWindow(String detectionsIndexKey, int sx, int sy, int win) {
+        try {
+            List<Map<String, Object>> dets = detectionStore.readAll(detectionsIndexKey);
+            int intact = 0, granulated = 0;
+            for (Map<String, Object> d : dets) {
+                double cx = ((Number) d.getOrDefault("cx", 0)).doubleValue();
+                double cy = ((Number) d.getOrDefault("cy", 0)).doubleValue();
+                if (cx < sx || cx > sx + win) continue;
+                if (cy < sy || cy > sy + win) continue;
+                int cells = Math.max(1, ((Number) d.getOrDefault("cells", 1)).intValue());
+                String cls = String.valueOf(d.getOrDefault("cls", ""));
+                if ("eos".equals(cls)) intact += cells;
+                else granulated += cells;
+            }
+            return new int[]{intact, granulated};
+        } catch (Exception e) {
+            log.error("exactCountInWindow failed for {}: {}", detectionsIndexKey, e.getMessage());
+            return new int[]{0, 0};
+        }
     }
 
     private void downloadToFile(String s3Path, Path dest) throws Exception {
