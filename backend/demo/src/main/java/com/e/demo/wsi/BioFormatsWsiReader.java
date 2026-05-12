@@ -38,6 +38,16 @@ public class BioFormatsWsiReader implements AutoCloseable {
   public int width()  { return reader.getSizeX(); }
   public int height() { return reader.getSizeY(); }
 
+  /** Сколько уровней пирамиды есть в WSI. SVS обычно даёт 3-4. */
+  public int resolutionCount() { return reader.getResolutionCount(); }
+
+  /** Переключиться на уровень пирамиды (0 = full-res, дальше — меньше). */
+  public void setResolution(int r) {
+    reader.setResolution(r);
+  }
+
+  public int currentResolution() { return reader.getResolution(); }
+
   /** MPP по X в микрометрах/пиксель из OME-метаданных, либо null. */
   public Double mppX() {
     Length l = meta.getPixelsPhysicalSizeX(0);

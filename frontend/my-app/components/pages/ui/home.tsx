@@ -329,8 +329,7 @@ export default function UploadPage() {
                     <div className="flex justify-between text-xs text-blue-700 font-bold uppercase tracking-wider">
                       <span>Загрузка на сервер</span><span>{uploadProgress}%</span>
                     </div>
-                    <Progress value={uploadProgress} className="h-2 bg-slate-200"
-                              indicatorClassName="bg-blue-600" />
+                    <Progress value={uploadProgress} className="h-2 bg-slate-200" />
                   </div>
                 )}
               </div>

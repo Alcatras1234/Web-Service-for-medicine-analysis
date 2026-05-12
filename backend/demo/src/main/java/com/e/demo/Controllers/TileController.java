@@ -4,6 +4,7 @@ import com.e.demo.entity.Job;
 import com.e.demo.repository.JobRepository;
 import com.e.demo.server.DetectionStore;
 import com.e.demo.server.TileService;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.CacheControl;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
@@ -22,6 +23,7 @@ import java.util.Map;
  */
 @RestController
 @RequestMapping("/api")
+@Slf4j
 public class TileController {
 
     private final TileService tileService;
@@ -70,8 +72,10 @@ public class TileController {
                     .contentType(MediaType.IMAGE_JPEG)
                     .body(tile);
         } catch (IllegalArgumentException e) {
+            log.warn("Tile bad request: slide={} level={} {}/{} -> {}", slideId, level, x, y, e.getMessage());
             return ResponseEntity.notFound().build();
         } catch (Exception e) {
+            log.error("Tile render failed: slide={} level={} {}/{}", slideId, level, x, y, e);
             return ResponseEntity.status(500).build();
         }
     }

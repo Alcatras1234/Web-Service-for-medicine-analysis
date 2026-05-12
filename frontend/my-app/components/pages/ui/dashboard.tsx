@@ -117,32 +117,36 @@ export default function DashboardPage() {
     }
   }
 
-  const handleDownloadPdf = async (slide: Slide) => {
+  const handleDownloadPdf = (slide: Slide) => {
     if (!slide.jobId) {
       toast.error("Отчёт ещё не готов")
       return
     }
+    // Простое решение — открываем прокси-URL в новой вкладке.
+    // Браузер сам пришлёт cookie (same-origin), Next.js прокси прокинет Bearer на бек,
+    // бек отдаст PDF с Content-Disposition: attachment → браузер его скачает.
+    window.open(`/api/reports/${slide.jobId}/pdf`, "_blank")
+  }
+
+  const handleRegenerateReport = async (slide: Slide) => {
+    if (!slide.jobId) return
     try {
-      const res = await fetch(`/api/reports/${slide.jobId}/pdf`, {
+      const res = await fetch(`/api/reports/${slide.jobId}/regenerate`, {
+        method: "POST",
         credentials: "include",
       })
-      if (!res.ok) {
-        toast.error("Отчёт ещё не готов")
+      if (res.status === 409) {
+        toast.error("Кейс подписан — регенерация запрещена")
         return
       }
-      const blob = await res.blob()
-      const url = URL.createObjectURL(blob)
-      const a = document.createElement("a")
-      a.href = url
-      a.download = `report-${slide.patientId || slide.id}.pdf`
-      document.body.appendChild(a)
-      a.click()
-      a.remove()
-      URL.revokeObjectURL(url)
-      toast.success("Отчёт скачан")
+      if (!res.ok) {
+        toast.error(`Ошибка: HTTP ${res.status}`)
+        return
+      }
+      toast.success("Регенерация запущена. Подождите ~30 сек и обновите список.")
     } catch (e) {
       console.error(e)
-      toast.error("Ошибка при скачивании отчёта")
+      toast.error("Сетевая ошибка")
     }
   }
 
@@ -323,6 +327,11 @@ export default function DashboardPage() {
                             disabled={!isDone(slide)}
                             onClick={() => handleDownloadPdf(slide)}>
                             <Download className="mr-2 h-4 w-4" />Скачать отчёт PDF
+                          </DropdownMenuItem>
+                          <DropdownMenuItem
+                            disabled={!isDone(slide)}
+                            onClick={() => handleRegenerateReport(slide)}>
+                            <RefreshCw className="mr-2 h-4 w-4" />Пересоздать отчёт
                           </DropdownMenuItem>
                           <DropdownMenuSeparator />
                           <DropdownMenuItem

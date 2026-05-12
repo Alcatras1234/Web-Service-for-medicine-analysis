@@ -32,6 +32,10 @@ public class Job {
     @Column(name = "max_hpf_count")
     private Integer maxHpfCount = 0;
 
+    /** §3.2: max HPF, учитывая ТОЛЬКО intact эозинофилы. По нему ставится диагноз. */
+    @Column(name = "max_hpf_intact")
+    private Integer maxHpfIntact = 0;
+
     @Column(name = "max_hpf_x")
     private Integer maxHpfX;
 
