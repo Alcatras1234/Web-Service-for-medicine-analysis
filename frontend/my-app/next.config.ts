@@ -8,11 +8,12 @@ import type { NextConfig } from "next";
 //
 // Теперь все /api/* запросы идут только через route handlers, которые читают
 // HTTP-only cookie 'token' и подставляют 'Authorization: Bearer ...'.
-//
-// Если для нового эндпоинта на беке нужен прокси — заведи его в app/api/.../route.ts
-// по образцу app/api/files/slides/route.ts (использует backendFetch из @/lib/backend).
 
 const nextConfig: NextConfig = {
+  // standalone — нужно для Dockerfile, кладёт в .next/standalone минимальный node server.
+  // Сильно уменьшает размер образа (без node_modules) и упрощает запуск (node server.js).
+  output: "standalone",
+
   // Разрешаем запросы с ngrok-туннелей (в dev-режиме Next.js по умолчанию блокирует не-localhost)
   allowedDevOrigins: [
     "*.ngrok-free.app",

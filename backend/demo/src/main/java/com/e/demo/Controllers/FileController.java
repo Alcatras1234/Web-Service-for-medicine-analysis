@@ -20,6 +20,11 @@ import org.springframework.security.core.Authentication;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.web.bind.annotation.*;
 
+import jakarta.servlet.http.HttpServletRequest;
+
+import java.io.InputStream;
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -66,13 +71,33 @@ public class FileController {
         return (Integer) auth.getPrincipal();
     }
 
-    // Шаг 1: получить presigned URL для загрузки в MinIO
+    // Шаг 1: зарезервировать objectKey и вернуть относительный URL прокси-аплоада.
+    // Раньше тут отдавали presigned URL прямо на MinIO — но в проде MinIO не выставлен
+    // наружу (только Spring через единственный открытый порт). Поэтому теперь браузер
+    // PUT'ит файл в наш же бэк, а Spring стримит в MinIO по docker-сети.
     @GetMapping("/get-upload-link")
     public Map<String, String> getLink(@RequestParam String filename) {
         currentUserId(); // проверка аутентификации
         String objectKey = UUID.randomUUID() + "_" + filename;
-        String url = minioService.generateUploadLink(bucket, objectKey);
+        String url = "/api/files/proxy-upload?objectKey=" + URLEncoder.encode(objectKey, StandardCharsets.UTF_8);
         return Map.of("uploadUrl", url, "objectKey", objectKey);
+    }
+
+    // Прокси-аплоад: браузер PUT'ит сюда сырое тело файла, Spring стримит в MinIO.
+    // На больших WSI (1-3 GB) тело может идти десятки секунд — Tomcat не таймаутит
+    // активные соединения с входящим трафиком.
+    @PutMapping("/proxy-upload")
+    public ResponseEntity<?> proxyUpload(@RequestParam String objectKey,
+                                         HttpServletRequest request) {
+        currentUserId(); // auth
+        long len = request.getContentLengthLong();
+        try (InputStream in = request.getInputStream()) {
+            minioService.putStream(bucket, objectKey, in, len);
+        } catch (Exception e) {
+            return ResponseEntity.status(500)
+                    .body(Map.of("error", "Upload failed: " + e.getMessage()));
+        }
+        return ResponseEntity.ok(Map.of("objectKey", objectKey));
     }
 
     // Шаг 2: подтвердить загрузку и запустить обработку. Инвалидирует кэш списка слайдов юзера.

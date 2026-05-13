@@ -202,10 +202,10 @@ services:
       dockerfile: Dockerfile
     container_name: eosinai-server
     hostname: server
-    ports:
-      # Spring Boot слушает 8080 внутри контейнера; снаружи отдаём через 18080
-      # чтобы не конфликтовать со штатным nginx/apache на сервере.
-      - "27:8080"
+    # Наружу НЕ публикуем — фронт ходит к нам по docker-сети по имени server:8080.
+    # Если нужен прямой доступ к API для отладки — добавь ports: ["18080:8080"].
+    expose:
+      - "8080"
     depends_on:
       - eosinai-postgres
       - eosinai-rabbitmq
@@ -217,7 +217,28 @@ services:
     volumes:
       - eosinai-wsi-cache:/tmp/wsi-cache
     environment:
-      # Публичный URL MinIO — отдаётся в браузер для presigned URL upload/download.
-      # Порт 19000 потому что 9000 на сервере уже занят другим сервисом.
-      - MINIO_PUBLIC_URL=http://localhost:19000
+      # MINIO_PUBLIC_URL больше не используется браузером для аплоада
+      # (мы проксируем через /api/files/proxy-upload). Оставлен на случай если где-то
+      # ещё понадобятся пресайны — указывает на внутренний docker-адрес.
+      - MINIO_PUBLIC_URL=http://minio:9000
+    restart: unless-stopped
+
+  # Next.js фронт — единственная штука, открытая наружу через порт 27.
+  # Всё API (включая аплоад файлов) идёт через route handlers Next.js → Spring (server:8080).
+  eosinai-frontend:
+    build:
+      context: ../frontend/my-app
+      dockerfile: Dockerfile
+    container_name: eosinai-frontend
+    hostname: frontend
+    ports:
+      - "27:3000"
+    depends_on:
+      - eosinai-server
+    networks:
+      - eosinai-net
+    environment:
+      - NODE_ENV=production
+      # Внутри docker-сети Spring доступен по имени контейнера server.
+      - BACKEND_URL=http://server:8080
     restart: unless-stopped

@@ -46,6 +46,15 @@ spring:
   cache:
     type: simple
 
+  # Multipart парсер не используется (стримим сырой PUT в /api/files/proxy-upload).
+  # Но дефолтные лимиты применяются и к multipart-, и к простым large-body запросам,
+  # поэтому явно разрешаем большие тела.
+  servlet:
+    multipart:
+      enabled: false
+      max-file-size: -1
+      max-request-size: -1
+
 minio:
   access-key: minioadmin
   secret-key: minioadmin
@@ -58,6 +67,11 @@ minio:
 
 server:
   port: 8080
+  tomcat:
+    # большой WSI (1-3 GB) может литься минутами — Tomcat не должен резать тело
+    max-swallow-size: -1
+    max-http-form-post-size: -1
+    connection-timeout: 30m
 
 logging:
   level:

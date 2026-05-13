@@ -112,10 +112,13 @@ export default function UploadPage() {
         throw new Error("Бэкенд вернул некорректный ответ для presigned URL")
       }
 
-      // ── Шаг 2: PUT в MinIO с прогрессом ─────────────────────────────────
+      // ── Шаг 2: PUT через прокси в Spring → MinIO с прогрессом ───────────
+      // uploadUrl теперь относительный (/api/files/proxy-upload?objectKey=...),
+      // тело уходит сырым PUT'ом, Spring стримит в MinIO по docker-сети.
       await new Promise<void>((resolve, reject) => {
         const xhr = new XMLHttpRequest()
         xhr.open("PUT", uploadUrl, true)
+        xhr.withCredentials = true // cookie 'token' для auth
         xhr.upload.onprogress = (event) => {
           if (event.lengthComputable) {
             setUploadProgress(Math.round((event.loaded / event.total) * 100))
