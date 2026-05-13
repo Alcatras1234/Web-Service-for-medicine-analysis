@@ -231,10 +231,10 @@ services:
       dockerfile: Dockerfile
     container_name: eosinai-frontend
     hostname: frontend
-    # expose:
-    #   - "3000"
-    ports:
-      - "3000:27"
+    expose:
+      - "3000"
+    # ports:
+    #   - "3000:27"
     depends_on:
       - eosinai-server
     networks:
@@ -245,22 +245,29 @@ services:
       - BACKEND_URL=http://server:8080
     restart: unless-stopped
 
-  # ngrok — публичный туннель в облако ngrok, наружу пробрасывает frontend:3000.
-  # Не требует открытых портов на сервере (только исходящий интернет).
-  # URL виден в логах: docker compose logs eosinai-ngrok | grep "started tunnel"
-  # Web UI ngrok доступен изнутри docker-сети на http://ngrok:4040 (но наружу нет).
-  eosinai-ngrok:
-    image: ngrok/ngrok:latest
-    container_name: eosinai-ngrok
-    hostname: ngrok
-    command:
-      - "http"
-      - "frontend:3000"
-      - "--log=stdout"
-    environment:
-      - NGROK_AUTHTOKEN=3AOgmmodiTBdIAWRB1Q7N0lNDtK_5E3ekTK91ahY5K4aB7Y2M
+  # Cloudflare Tunnel — публичный URL без регистрации. Использует исходящий 443
+  # на инфру Cloudflare (которую блокируют редко — это огромный CDN).
+  # URL виден в логах: docker compose logs eosinai-cloudflared | grep trycloudflare
+  eosinai-cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: eosinai-cloudflared
+    hostname: cloudflared
+    command: tunnel --no-autoupdate --url http://frontend:3000
     depends_on:
       - eosinai-frontend
     networks:
       - eosinai-net
     restart: unless-stopped
+
+  # ngrok оставлен закомментированным — на этом сервере исходящий до ngrok заблокирован.
+  # eosinai-ngrok:
+  #   image: ngrok/ngrok:latest
+  #   container_name: eosinai-ngrok
+  #   command: ["http", "frontend:3000", "--log=stdout"]
+  #   environment:
+  #     - NGROK_AUTHTOKEN=${NGROK_AUTHTOKEN}
+  #   depends_on:
+  #     - eosinai-frontend
+  #   networks:
+  #     - eosinai-net
+  #   restart: unless-stopped
