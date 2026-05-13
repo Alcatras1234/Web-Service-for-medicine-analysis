@@ -1,33 +1,40 @@
+# Все контейнеры этого проекта именованы с префиксом eosinai-* и помещены
+# в одну сеть eosinai-net. Project name задаётся через COMPOSE_PROJECT_NAME=eosinai
+# (см. .env рядом) — это значит:
+#   docker compose up -d        ← поднимает только наши контейнеры
+#   docker compose down         ← гасит только наши, чужие на сервере не трогает
+#   docker compose ps           ← показывает только наши
+# Не используй "docker stop $(docker ps -q)" — снесёт ВСЕ контейнеры на сервере.
 
 networks:
-  dev:
+  eosinai-net:
     driver: bridge
+    name: eosinai-net
+
+volumes:
+  eosinai-postgres-data:
+  eosinai-pgadmin-data:
+  eosinai-minio-data:
+  eosinai-wsi-cache:
+  eosinai-triton-models:
+
 services:
-  # nginx:
-  #   image: nginx:stable-alpine
-  #   ports:
-  #     - "80:80"
-  #   volumes:
-  #     - './nginx.conf:/etc/nginx/nginx.conf'
-  #   depends_on:
-  #     - auth_db
-  #   networks:
-  #     - dev
-    
-  backend_db:
+
+  eosinai-postgres:
     image: postgres:15
+    container_name: eosinai-postgres
+    hostname: backend_db          # ← старое имя оставлено, иначе придётся править application.yaml
     environment:
       POSTGRES_DB: "back_DB"
       POSTGRES_USER: "amogus"
       POSTGRES_PASSWORD: "1234"
       PGDATA: "/var/lib/postgresql/data/pgdata"
     volumes:
-      - auth_data:/var/lib/postgresql/data/pgdata
-      - wsi-cache:/tmp/wsi-cache
+      - eosinai-postgres-data:/var/lib/postgresql/data/pgdata
     ports:
       - "5432:5432"
     networks:
-      - dev
+      - eosinai-net
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U amogus -d back_DB"]
       interval: 10s
@@ -41,124 +48,160 @@ services:
           cpus: '1'
           memory: 4G
 
-  minio:
-    image: minio/minio
-    command: server /data --console-address ":9001"
-    ports:
-      - "9000:9000" # API порт (куда клиент будет делать PUT)
-      - "9001:9001" # Консоль
-    networks:
-      - dev
-    environment:
-      MINIO_ROOT_USER: minioadmin
-      MINIO_ROOT_PASSWORD: minioadmin
-
-
-  pgadmin:
+  eosinai-pgadmin:
     image: dpage/pgadmin4
-    container_name: pgadmin
+    container_name: eosinai-pgadmin
     environment:
       PGADMIN_DEFAULT_EMAIL: admin@admin.com
       PGADMIN_DEFAULT_PASSWORD: admin
     ports:
       - "5050:80"
     depends_on:
-      - backend_db
+      - eosinai-postgres
     volumes:
-      - pgadmin_data:/var/lib/pgadmin
+      - eosinai-pgadmin-data:/var/lib/pgadmin
     networks:
-      - dev
+      - eosinai-net
+    restart: unless-stopped
 
-  auth:
-    build:
-       context: ./demo
-       dockerfile: Dockerfile
-    container_name: server
-    hostname: server
+  eosinai-minio:
+    image: minio/minio
+    container_name: eosinai-minio
+    hostname: minio              # ← алиас, чтобы application.yaml не править
+    command: server /data --console-address ":9001"
     ports:
-       - "8080:8080"
-    depends_on:
-        - backend_db
-        - rabbitmq
+      - "9000:9000"
+      - "9001:9001"
     networks:
-       - dev
-  # redis:
-  #   image: redis:7-alpine
-  #   container_name: redis-container
-  #   ports:
-  #     - "6379:6379" # Проброс порта
-  #   volumes:
-  #     - redis-data:/data # Для сохранения данных
-  #   command: [ "redis-server", "--save", "60", "1", "--loglevel", "debug" ]
-  #   restart: unless-stopped
-  #   networks:
-  #     - dev
-  
-  liquibase-migrations:
-      container_name: migrations
-      image: liquibase/liquibase:4.29
-      depends_on:
-        - backend_db
-      command:
-        - --searchPath=/changesets
-        - --changelog-file=master.yaml
-        - --driver=org.postgresql.Driver
-        - --url=jdbc:postgresql://backend_db:5432/back_DB
-        - --username=amogus
-        - --password=1234
-        - update
-      volumes:
-        - ./db/init.sql:/changesets/init.sql
-        - ./db/master.yaml:/changesets/master.yaml
-      networks:
-        - dev
-  
-  rabbitmq:
+      - eosinai-net
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    volumes:
+      - eosinai-minio-data:/data
+    restart: unless-stopped
+
+  eosinai-rabbitmq:
     image: rabbitmq:3-management
+    container_name: eosinai-rabbitmq
+    hostname: rabbitmq           # ← алиас
     ports:
       - "5672:5672"
       - "15672:15672"
     networks:
-      - dev
+      - eosinai-net
+    restart: unless-stopped
 
-  redis:
+  eosinai-redis:
     image: redis:7-alpine
-    container_name: redis
-    hostname: redis
+    container_name: eosinai-redis
+    hostname: redis              # ← алиас
     ports:
       - "6379:6379"
-    # Памяти даём 256 МБ; LRU-эвикшн чтобы не падать при заполнении
     command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru --save ""
     networks:
-      - dev
+      - eosinai-net
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
       timeout: 3s
       retries: 5
-  inference:
-      build:
-        context: ./inference-service
-        dockerfile: Dockerfile
-      hostname: inference
-      ports:
-        - "8500:8500"
-      networks:
-        - dev
-      # Модель крутится на удалённом Triton — локальный GPU не нужен.
-      # Этот сервис теперь препроцессинг + НМС/маски/CC + прокси к Triton по gRPC.
-      environment:
-        - TRITON_URL=188.126.62.18:18001
-        - TRITON_MODEL_NAME=eosinophil_pipeline
-        - TRITON_TIMEOUT_S=60
-        - CONF_THRESH=0.25
-        - IOU_THRESH=0.45
-        - INPUT_SIZE=448
-        - NUM_CLASSES=2
+    restart: unless-stopped
 
-volumes:
-  auth_data:
-  wsi-cache:
-  # redis-data:
-  pgadmin_data:
+  eosinai-liquibase:
+    image: liquibase/liquibase:4.29
+    container_name: eosinai-liquibase
+    depends_on:
+      - eosinai-postgres
+    command:
+      - --searchPath=/changesets
+      - --changelog-file=master.yaml
+      - --driver=org.postgresql.Driver
+      - --url=jdbc:postgresql://backend_db:5432/back_DB
+      - --username=amogus
+      - --password=1234
+      - update
+    volumes:
+      - ./db/init.sql:/changesets/init.sql
+      - ./db/master.yaml:/changesets/master.yaml
+    networks:
+      - eosinai-net
 
+  # Triton Inference Server — модель крутится прямо в нашем стеке
+  # Dockerfile лежит в /home/dbz/triton_eosinophil/ на сервере
+  eosinai-triton:
+    build:
+      context: /home/dbz/triton_eosinophil
+      dockerfile: Dockerfile
+    container_name: eosinai-triton
+    hostname: triton
+    ports:
+      - "18000:8000"   # HTTP REST (Triton дефолт)
+      - "18001:8001"   # gRPC
+      - "18002:8002"   # Metrics (Prometheus)
+    networks:
+      - eosinai-net
+    volumes:
+      - eosinai-triton-models:/models    # модели можно подгружать через volume
+    # Если в Dockerfile уже зашит запуск tritonserver — этот command не нужен.
+    # Иначе раскомментируй:
+    # command: tritonserver --model-repository=/models --strict-model-config=false
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/v2/health/ready"]
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 60s
+
+  eosinai-inference:
+    build:
+      context: ./inference-service
+      dockerfile: Dockerfile
+    container_name: eosinai-inference
+    hostname: inference
+    ports:
+      - "8500:8500"
+    networks:
+      - eosinai-net
+    depends_on:
+      - eosinai-triton
+    # Препроцессинг + NMS/маски/CC + прокси на Triton через gRPC.
+    # Triton теперь в той же сети — обращаемся по имени, не по IP.
+    environment:
+      - TRITON_URL=triton:8001
+      - TRITON_MODEL_NAME=eosinophil_pipeline
+      - TRITON_TIMEOUT_S=60
+      - CONF_THRESH=0.25
+      - IOU_THRESH=0.45
+      - INPUT_SIZE=448
+      - NUM_CLASSES=2
+      - COORD_SCALE_FACTOR=1.0
+    restart: unless-stopped
+
+  eosinai-server:
+    build:
+      context: ./demo
+      dockerfile: Dockerfile
+    container_name: eosinai-server
+    hostname: server
+    ports:
+      - "27:27"
+    depends_on:
+      - eosinai-postgres
+      - eosinai-rabbitmq
+      - eosinai-minio
+      - eosinai-redis
+      - eosinai-inference
+    networks:
+      - eosinai-net
+    volumes:
+      - eosinai-wsi-cache:/tmp/wsi-cache
+    restart: unless-stopped

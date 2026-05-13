@@ -32,25 +32,27 @@ WHITE_THRESH = float(os.environ.get("WHITE_THRESH", "240"))
 COORD_SCALE_FACTOR = float(os.environ.get("COORD_SCALE_FACTOR", "1.0"))
 
 # ── Triton gRPC ───────────────────────────────────────────────────────────────
-# host:port, например "188.126.62.18:18001"  (без http://)
-TRITON_URL        = os.environ.get("TRITON_URL", "188.126.62.18:18001")
-TRITON_MODEL_NAME = os.environ.get("TRITON_MODEL_NAME", "eosin_yolo")
+# По умолчанию обращаемся к сервису triton в той же docker-сети eosinai-net.
+# Имя "triton" резолвится в IP контейнера eosinai-triton (hostname: triton).
+# Переопределить через env TRITON_URL — если когда-то снова понадобится remote.
+TRITON_URL        = os.environ.get("TRITON_URL", "triton:8001")
+TRITON_MODEL_NAME = os.environ.get("TRITON_MODEL_NAME", "eosinophil_pipeline")
 TRITON_TIMEOUT_S  = int(os.environ.get("TRITON_TIMEOUT_S", "60"))
 
 logger.info(f"Connecting to Triton {TRITON_URL} (model={TRITON_MODEL_NAME})")
 
 # Keep-alive параметры — чтобы gRPC канал не засыпал между батчами.
-# RTT до Triton (188.126.62.18) ~150ms; cold reconnect = ~750ms потерь на батч,
-# а у нас бывают паузы 5-15 сек между батчами (пока качаются патчи) → канал
-# успевает закрыться. Эти настройки шлют пустой ping каждые 10 сек, держа TCP живым.
+# Triton теперь поднят локально в той же docker-сети eosinai-net (контейнер
+# eosinai-triton, имя 'triton'). RTT < 1ms, но keep-alive всё равно полезен —
+# защищает от idle-disconnect при долгих паузах (когда тайлинг идёт без инференса).
 _TRITON_CHANNEL_ARGS = [
-    ("grpc.keepalive_time_ms",                          10000),  # ping каждые 10 сек
-    ("grpc.keepalive_timeout_ms",                        5000),  # ждём ответ 5 сек
-    ("grpc.keepalive_permit_without_calls",                 1),  # пинговать даже без активных запросов
-    ("grpc.http2.max_pings_without_data",                   0),  # без лимита на ping'и без данных
+    ("grpc.keepalive_time_ms",                          30000),  # ping раз в 30 сек (на локалке реже)
+    ("grpc.keepalive_timeout_ms",                        5000),
+    ("grpc.keepalive_permit_without_calls",                 1),
+    ("grpc.http2.max_pings_without_data",                   0),
     ("grpc.http2.min_time_between_pings_ms",            10000),
     ("grpc.http2.min_ping_interval_without_data_ms",     5000),
-    # Увеличиваем max receive size до 64 МБ — Triton может вернуть здоровенные тензоры
+    # Triton может вернуть здоровенные тензоры (proto-маски, сегментацию)
     ("grpc.max_receive_message_length",            64 * 1024 * 1024),
     ("grpc.max_send_message_length",               64 * 1024 * 1024),
 ]
