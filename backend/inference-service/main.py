@@ -202,134 +202,47 @@ def run_nms(output: np.ndarray, proto: np.ndarray = None) -> list:
     output: (1, 4+nc[+32], anchors). Берём только detect-часть для NMS.
     proto:  (1, 32, mh, mw) — proto-маски, только если seg-модель.
     """
-    preds = output[0]                    # (4+nc[+32], anchors)
-    coords = preds[:4, :].T              # (anchors, 4) xywh
-    if COORD_SCALE_FACTOR != 1.0:
-        coords = coords * COORD_SCALE_FACTOR  # ресайз если pipeline отдаёт в др. простр-ве
-    scores = preds[4:4 + NUM_CLASSES]    # (nc, anchors)
-
-    if scores.size == 0:
+    # triton_out: словарь boxes/scores/classes/masks/num_dets из ensemble.
+    # Triton postprocess уже сделал NMS и пересчитал координаты под orig_shape.
+    triton_out = output  # сигнатура аргумента оставлена для совместимости с callers
+    boxes   = triton_out.get("boxes")    if isinstance(triton_out, dict) else None
+    scores  = triton_out.get("scores")   if isinstance(triton_out, dict) else None
+    classes = triton_out.get("classes")  if isinstance(triton_out, dict) else None
+    if boxes is None or scores is None or classes is None:
         return []
-    if scores.max() > 1.0:
-        scores = _sigmoid(scores)
+    n = int(min(len(boxes), len(scores), len(classes)))
+    if n == 0:
+        return []
 
-    cls_ids    = scores.argmax(axis=0)
-    cls_scores = scores.max(axis=0)
-
-    # Debug: один раз залогируем диапазон координат из pipeline,
-    # чтобы понять в каком пространстве (448? 640?) выдаются bbox'ы.
+    # Debug: один раз залогируем диапазон координат — убедиться что они в [0, H/W] исходника
     global _COORD_LOG_DONE
     try:
         _COORD_LOG_DONE
     except NameError:
         _COORD_LOG_DONE = False
-    if not _COORD_LOG_DONE and coords.size > 0 and cls_scores.max() > CONF_THRESH:
+    if not _COORD_LOG_DONE:
         _COORD_LOG_DONE = True
-        valid_mask = cls_scores > CONF_THRESH
-        valid_coords = coords[valid_mask]
-        if len(valid_coords) > 0:
-            logger.info(
-                f"FIRST DETECTION (DEBUG): coords ranges  x_min={valid_coords[:,0].min():.1f} "
-                f"x_max={valid_coords[:,0].max():.1f}  w_max={valid_coords[:,2].max():.1f}  "
-                f"(INPUT_SIZE={INPUT_SIZE}, scale={COORD_SCALE_FACTOR}). "
-                f"Если x_max сильно больше {INPUT_SIZE} → выстави COORD_SCALE_FACTOR={INPUT_SIZE}/<actual_max>"
-            )
-
-    has_masks = IS_SEG_MODEL and proto is not None and preds.shape[0] >= 4 + NUM_CLASSES + 32
-    mask_coefs = preds[4 + NUM_CLASSES:4 + NUM_CLASSES + 32].T if has_masks else None  # (anchors, 32)
-
-    mask_above = cls_scores > CONF_THRESH
-    coords  = coords[mask_above]
-    cls_ids = cls_ids[mask_above]
-    confs   = cls_scores[mask_above]
-    if has_masks:
-        mask_coefs = mask_coefs[mask_above]
-    if len(coords) == 0:
-        return []
-
-    x1 = coords[:, 0] - coords[:, 2] / 2
-    y1 = coords[:, 1] - coords[:, 3] / 2
-    x2 = coords[:, 0] + coords[:, 2] / 2
-    y2 = coords[:, 1] + coords[:, 3] / 2
-
-    valid = ((coords[:, 2] > 2) & (coords[:, 3] > 2) &
-             (coords[:, 2] < INPUT_SIZE * 0.9) &
-             (coords[:, 3] < INPUT_SIZE * 0.9) &
-             (x2 > 0) & (y2 > 0) &
-             (x1 < INPUT_SIZE) & (y1 < INPUT_SIZE))
-    x1, y1, x2, y2 = x1[valid], y1[valid], x2[valid], y2[valid]
-    cls_ids = cls_ids[valid]
-    confs   = confs[valid]
-    if has_masks:
-        mask_coefs = mask_coefs[valid]
-    if len(x1) == 0:
-        return []
-
-    xyxy = np.stack([x1, y1, x2, y2], axis=1).astype(np.float32)
-    indices = cv2.dnn.NMSBoxes(xyxy.tolist(), confs.tolist(),
-                               CONF_THRESH, IOU_THRESH)
-    if len(indices) == 0:
-        return []
-
-    # ── §3.1: connected components на masks для split'a слипшихся клеток ──────
-    cc_per_det = None
-    if has_masks:
-        cc_per_det = _compute_cc_counts(
-            proto, mask_coefs, [int(i) for i in indices],
-            x1, y1, x2, y2, INPUT_SIZE
+        logger.info(
+            f"FIRST DETECTION (DEBUG): n={n}, x_max={float(boxes[:,2].max()):.1f}, "
+            f"y_max={float(boxes[:,3].max()):.1f}, conf_max={float(scores.max()):.2f}"
         )
 
     out = []
-    for k, i in enumerate(indices):
-        ii = int(i)
-        det = {
-            "cls_id": int(cls_ids[ii]),
-            "cx":   float((x1[ii] + x2[ii]) / 2),
-            "cy":   float((y1[ii] + y2[ii]) / 2),
-            "x1":   float(x1[ii]), "y1": float(y1[ii]),
-            "x2":   float(x2[ii]), "y2": float(y2[ii]),
-            "conf": float(confs[ii]),
-        }
-        if cc_per_det is not None:
-            det["cc"] = int(cc_per_det[k])     # сколько отдельных компонент в маске этого bbox'а
-        out.append(det)
+    for i in range(n):
+        x1, y1, x2, y2 = (float(boxes[i, 0]), float(boxes[i, 1]),
+                          float(boxes[i, 2]), float(boxes[i, 3]))
+        out.append({
+            "cls_id": int(classes[i]),
+            "cx":   (x1 + x2) / 2,
+            "cy":   (y1 + y2) / 2,
+            "x1":   x1, "y1": y1,
+            "x2":   x2, "y2": y2,
+            "conf": float(scores[i]),
+            # Triton постпроцесс уже разделил слипшиеся клетки в отдельные детекции,
+            # поэтому cc=1 на каждую (CC «в одной» больше не считаем).
+            "cc":   1,
+        })
     return out
-
-
-def _compute_cc_counts(proto, mask_coefs_kept, kept_idx, x1, y1, x2, y2, input_size):
-    """
-    Для каждого bbox после NMS:
-      1. Строим маску = sigmoid(coefs @ proto.flatten)
-      2. Crop по bbox
-      3. Threshold > 0.5 → бинарка
-      4. cv2.connectedComponents → число отдельных клеток в маске
-    Возвращает np.array[len(kept_idx)].
-    """
-    p = proto[0]                          # (32, mh, mw)
-    nm, mh, mw = p.shape
-    proto_flat = p.reshape(nm, mh * mw).astype(np.float32)
-    sx = mw / input_size
-    sy = mh / input_size
-
-    counts = np.ones(len(kept_idx), dtype=np.int32)  # дефолт = 1 (одна клетка на bbox)
-    for k, ii in enumerate(kept_idx):
-        coefs = mask_coefs_kept[k].astype(np.float32)            # (32,)
-        m = _sigmoid(coefs @ proto_flat).reshape(mh, mw)         # (mh, mw)
-        # crop в координатах маски
-        mx1 = max(0, int(x1[ii] * sx))
-        my1 = max(0, int(y1[ii] * sy))
-        mx2 = min(mw, int(np.ceil(x2[ii] * sx)))
-        my2 = min(mh, int(np.ceil(y2[ii] * sy)))
-        if mx2 - mx1 < 2 or my2 - my1 < 2:
-            continue
-        crop = m[my1:my2, mx1:mx2]
-        binary = (crop > 0.5).astype(np.uint8)
-        if binary.sum() == 0:
-            continue
-        n_components, _ = cv2.connectedComponents(binary)
-        # cv2 возвращает кол-во компонент включая фон
-        counts[k] = max(1, n_components - 1)
-    return counts
 
 
 def apply_overlap_filter(dets: list, meta) -> dict:
@@ -401,28 +314,25 @@ def apply_overlap_filter(dets: list, meta) -> dict:
 
 
 # ── Triton gRPC инференс ──────────────────────────────────────────────────────
+# Pipeline на Triton (ensemble eosinophil_pipeline) делает ВЕСЬ постпроцессинг сам:
+#   preprocess → YOLO11s-seg → postprocess (NMS, маски, ремаппинг в orig coords)
+# Возвращает: boxes (N,4), scores (N), classes (N), masks (N,112,112), num_dets (1).
+# Нам остаётся только overlap-filter (inner zone) на стороне нашего Python.
 def _run_blocking(hwc_uint8: np.ndarray):
     """
-    Шлёт изображение в Triton (eosinophil_pipeline) и возвращает (det, proto).
-
-    ВАЖНО: pipeline на Triton ВКЛЮЧАЕТ препроцессинг (resize/normalize/transpose),
-    поэтому ему нужны СЫРЫЕ uint8 RGB пиксели (HWC), а не наш float32 NCHW.
-    Имя входа — image_input. Если pipeline ожидает другую раскладку (NCHW vs HWC) —
-    надо смотреть его `config.pbtxt`.
+    Шлёт HWC uint8 (H,W,3) → возвращает dict {boxes, scores, classes, masks, num_dets}.
     """
-    # HWC uint8 (H, W, 3) — обычно pipeline через DALI/Python backend сам ресайзит/нормализует
-    # Если pipeline хочет NCHW uint8 — выставь env TRITON_INPUT_LAYOUT=NCHW
-    if os.environ.get("TRITON_INPUT_LAYOUT", "HWC").upper() == "NCHW":
-        data = np.ascontiguousarray(hwc_uint8.transpose(2, 0, 1)[np.newaxis], dtype=np.uint8)  # (1,3,H,W)
-    else:
-        data = np.ascontiguousarray(hwc_uint8[np.newaxis], dtype=np.uint8)                     # (1,H,W,3)
+    inp = triton_grpc.InferInput("image_input", list(hwc_uint8.shape),
+                                  np_to_triton_dtype(hwc_uint8.dtype))
+    inp.set_data_from_numpy(hwc_uint8)
 
-    inp = triton_grpc.InferInput(input_name, list(data.shape), np_to_triton_dtype(data.dtype))
-    inp.set_data_from_numpy(data)
-
-    requested = [triton_grpc.InferRequestedOutput(det_output_name)]
-    if IS_SEG_MODEL and proto_output_name:
-        requested.append(triton_grpc.InferRequestedOutput(proto_output_name))
+    requested = [
+        triton_grpc.InferRequestedOutput("boxes"),
+        triton_grpc.InferRequestedOutput("scores"),
+        triton_grpc.InferRequestedOutput("classes"),
+        triton_grpc.InferRequestedOutput("masks"),
+        triton_grpc.InferRequestedOutput("num_dets"),
+    ]
 
     response = triton_client.infer(
         model_name=TRITON_MODEL_NAME,
@@ -430,15 +340,20 @@ def _run_blocking(hwc_uint8: np.ndarray):
         outputs=requested,
         client_timeout=TRITON_TIMEOUT_S,
     )
-    det = response.as_numpy(det_output_name)
-    proto = response.as_numpy(proto_output_name) if (IS_SEG_MODEL and proto_output_name) else None
-    return det, proto
+    return {
+        "boxes":    response.as_numpy("boxes"),     # (N, 4) xyxy в координатах исходного входа
+        "scores":   response.as_numpy("scores"),    # (N,)
+        "classes":  response.as_numpy("classes"),   # (N,) 0=eos, 1=eosg
+        "masks":    response.as_numpy("masks"),     # (N, 112, 112) бинарные/sigmoid маски клеток
+        "num_dets": response.as_numpy("num_dets"),  # (1,)
+    }
 
 
-async def run_session(nchw: np.ndarray):
+async def run_session(hwc_uint8: np.ndarray):
+    """Возвращает dict {boxes, scores, classes, masks, num_dets} от ensemble pipeline."""
     loop = asyncio.get_event_loop()
     try:
-        return await loop.run_in_executor(GPU_EXECUTOR, _run_blocking, nchw)
+        return await loop.run_in_executor(GPU_EXECUTOR, _run_blocking, hwc_uint8)
     except Exception as e:
         async with _session_lock:
             _maybe_recreate_session(e)
@@ -476,10 +391,10 @@ async def infer(req: InferRequest):
     # Triton pipeline сам ресайзит — но мы всё равно даём 448×448 для консистентности
     resized = cv2.resize(img_rgb, (INPUT_SIZE, INPUT_SIZE)).astype(np.uint8)
     try:
-        det, proto = await run_session(resized)
+        triton_out = await run_session(resized)
     except Exception as e:
         raise HTTPException(500, f"Inference failed: {e}")
-    dets = run_nms(det, proto)
+    dets = run_nms(triton_out)
     total_cells = sum(int(d.get("cc", 1)) for d in dets)
     return {"eosinophil_count": total_cells,
             "boxes": [{"x1": d["x1"], "y1": d["y1"],
@@ -497,11 +412,11 @@ async def infer_raw(req: TensorRequest):
         return apply_overlap_filter([], req)
 
     try:
-        det, proto = await run_session(hwc)        # сырой HWC uint8 — Triton сам нормализует
+        triton_out = await run_session(hwc)        # сырой HWC uint8 — Triton сам нормализует
     except Exception as e:
         raise HTTPException(500, f"Inference failed: {e}")
 
-    dets = run_nms(det, proto)
+    dets = run_nms(triton_out)
     return apply_overlap_filter(dets, req)
 
 
@@ -520,7 +435,7 @@ async def infer_batch(req: BatchTensorRequest):
                             "detections": []})
             continue
         try:
-            det, proto = await run_session(hwc)    # raw HWC uint8 → Triton pipeline
+            triton_out = await run_session(hwc)    # raw HWC uint8 → Triton pipeline
         except Exception as e:
             logger.error(f"patch {patch.patch_id} failed: {e}")
             results.append({"patch_id": patch.patch_id,
@@ -528,7 +443,7 @@ async def infer_batch(req: BatchTensorRequest):
                             "valid_eos": 0, "valid_eosg": 0,
                             "detections": []})
             continue
-        dets = run_nms(det, proto)
+        dets = run_nms(triton_out)
         results.append(apply_overlap_filter(dets, patch))
     return out
 
@@ -539,15 +454,14 @@ async def debug_raw(req: InferRequest):
     pil_img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
     img_rgb = np.array(pil_img)
     resized = cv2.resize(img_rgb, (INPUT_SIZE, INPUT_SIZE)).astype(np.uint8)
-    det, proto = await run_session(resized)
-    scores = det[0][4:4 + NUM_CLASSES, :]
+    triton_out = await run_session(resized)
+    boxes = triton_out.get("boxes")
+    scores = triton_out.get("scores")
+    classes = triton_out.get("classes")
     return {
-        "is_seg_model":   IS_SEG_MODEL,
-        "det_shape":      list(det.shape),
-        "proto_shape":    list(proto.shape) if proto is not None else None,
-        "num_outputs":    len(all_outputs),
-        "scores_min":     float(scores.min()),
-        "scores_max":     float(scores.max()),
-        "scores_gt_0.25": int((scores.max(axis=0) > 0.25).sum()),
-        "scores_gt_0.5":  int((scores.max(axis=0) > 0.5).sum()),
+        "pipeline":       TRITON_MODEL_NAME,
+        "num_detections": int(len(boxes)) if boxes is not None else 0,
+        "scores_min":     float(scores.min()) if scores is not None and len(scores) else None,
+        "scores_max":     float(scores.max()) if scores is not None and len(scores) else None,
+        "classes_unique": list(map(int, np.unique(classes))) if classes is not None else [],
     }

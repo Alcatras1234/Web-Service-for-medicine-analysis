@@ -16,7 +16,7 @@ volumes:
   # eosinai-pgadmin-data:    # pgAdmin отключён
   eosinai-minio-data:
   eosinai-wsi-cache:
-  eosinai-triton-models:
+  # eosinai-triton-models:   # модели лежат внутри Triton-образа, volume не нужен
 
 services:
 
@@ -141,21 +141,21 @@ services:
     container_name: eosinai-triton
     hostname: triton
     # Порты НЕ публикуем наружу — Triton доступен только из docker-сети eosinai-net
-    # через имена triton:8000 (HTTP) и triton:8001 (gRPC). Это:
-    #   1) Решает конфликт портов с уже работающим на сервере сервисом на 18000
-    #   2) Безопаснее — Triton не торчит в интернет
-    # Если нужен внешний доступ для debug — раскомментируй блок:
-    # ports:
-    #   - "18000:8000"   # HTTP REST
-    #   - "18001:8001"   # gRPC
-    #   - "18002:8002"   # Prometheus metrics
+    # через имена triton:8000 (HTTP) и triton:8001 (gRPC).
     networks:
       - eosinai-net
+    # Модели лежат на хосте отдельной папкой (read-only монтирование).
+    # Внутри ожидаются папки eosinophil_pipeline (ensemble), eosinophil_preprocess,
+    # eosinophil_seg, eosinophil_postprocess.
     volumes:
-      - eosinai-triton-models:/models    # модели можно подгружать через volume
-    # Если в Dockerfile уже зашит запуск tritonserver — этот command не нужен.
-    # Иначе раскомментируй:
-    # command: tritonserver --model-repository=/models --strict-model-config=false
+      - /home/dbz/triton_eosinophil/models:/models:ro
+    # Базовый образ tritonserver:24.09-py3 имеет дефолтный ENTRYPOINT=tritonserver,
+    # но без явного --model-repository выходит сразу. Указываем явно.
+    command: >
+      tritonserver
+      --model-repository=/models
+      --strict-model-config=false
+      --log-verbose=1
     restart: unless-stopped
     deploy:
       resources:
