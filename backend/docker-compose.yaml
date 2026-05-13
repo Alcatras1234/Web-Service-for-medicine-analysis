@@ -13,7 +13,7 @@ networks:
 
 volumes:
   eosinai-postgres-data:
-  eosinai-pgadmin-data:
+  # eosinai-pgadmin-data:    # pgAdmin отключён
   eosinai-minio-data:
   eosinai-wsi-cache:
   eosinai-triton-models:
@@ -50,21 +50,22 @@ services:
           cpus: '1'
           memory: 4G
 
-  eosinai-pgadmin:
-    image: dpage/pgadmin4
-    container_name: eosinai-pgadmin
-    environment:
-      PGADMIN_DEFAULT_EMAIL: admin@admin.com
-      PGADMIN_DEFAULT_PASSWORD: admin
-    ports:
-      - "15050:80"
-    depends_on:
-      - eosinai-postgres
-    volumes:
-      - eosinai-pgadmin-data:/var/lib/pgadmin
-    networks:
-      - eosinai-net
-    restart: unless-stopped
+  # pgAdmin отключён — не нужен в проде. При необходимости расскомментировать.
+  # eosinai-pgadmin:
+  #   image: dpage/pgadmin4
+  #   container_name: eosinai-pgadmin
+  #   environment:
+  #     PGADMIN_DEFAULT_EMAIL: admin@admin.com
+  #     PGADMIN_DEFAULT_PASSWORD: admin
+  #   ports:
+  #     - "15050:80"
+  #   depends_on:
+  #     - eosinai-postgres
+  #   volumes:
+  #     - eosinai-pgadmin-data:/var/lib/pgadmin
+  #   networks:
+  #     - eosinai-net
+  #   restart: unless-stopped
 
   eosinai-minio:
     image: minio/minio
@@ -139,10 +140,15 @@ services:
       dockerfile: Dockerfile
     container_name: eosinai-triton
     hostname: triton
-    ports:
-      - "18000:8000"   # HTTP REST (Triton дефолт)
-      - "18001:8001"   # gRPC
-      - "18002:8002"   # Metrics (Prometheus)
+    # Порты НЕ публикуем наружу — Triton доступен только из docker-сети eosinai-net
+    # через имена triton:8000 (HTTP) и triton:8001 (gRPC). Это:
+    #   1) Решает конфликт портов с уже работающим на сервере сервисом на 18000
+    #   2) Безопаснее — Triton не торчит в интернет
+    # Если нужен внешний доступ для debug — раскомментируй блок:
+    # ports:
+    #   - "18000:8000"   # HTTP REST
+    #   - "18001:8001"   # gRPC
+    #   - "18002:8002"   # Prometheus metrics
     networks:
       - eosinai-net
     volumes:

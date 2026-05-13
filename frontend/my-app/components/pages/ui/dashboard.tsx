@@ -44,6 +44,13 @@ export default function DashboardPage() {
   const [slides, setSlides] = useState<Slide[]>([])
   const [searchQuery, setSearchQuery] = useState("")
   const [isLoading, setIsLoading] = useState(true)
+  const [isAdmin, setIsAdmin] = useState(false)
+
+  // Подсматриваем роль из localStorage чтобы показать пункт "Пользователи" только админу
+  useEffect(() => {
+    const role = typeof window !== "undefined" ? localStorage.getItem("userRole") : null
+    setIsAdmin(role === "ADMIN")
+  }, [])
 
   const fetchSlides = useCallback(async () => {
     try {
@@ -202,6 +209,12 @@ export default function DashboardPage() {
                     className="text-slate-700 hover:text-blue-700">
               Кейсы
             </Button>
+            {isAdmin && (
+              <Button variant="ghost" onClick={() => router.push("/admin/users")}
+                      className="text-red-700 hover:bg-red-50">
+                Пользователи
+              </Button>
+            )}
             <Button variant="ghost" size="icon" onClick={fetchSlides} title="Обновить список">
               <RefreshCw className={`h-4 w-4 ${isLoading ? "animate-spin" : ""}`} />
             </Button>
