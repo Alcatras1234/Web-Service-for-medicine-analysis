@@ -16,6 +16,7 @@ type SlideInfo = {
 }
 
 type Detections = {
+  jobId: string
   totalEosinophils: number
   maxHpfCount: number
   maxHpfX: number
