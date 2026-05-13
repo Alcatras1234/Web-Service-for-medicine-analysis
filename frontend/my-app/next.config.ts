@@ -10,9 +10,9 @@ import type { NextConfig } from "next";
 // HTTP-only cookie 'token' и подставляют 'Authorization: Bearer ...'.
 
 const nextConfig: NextConfig = {
-  // standalone — нужно для Dockerfile, кладёт в .next/standalone минимальный node server.
-  // Сильно уменьшает размер образа (без node_modules) и упрощает запуск (node server.js).
-  output: "standalone",
+  // standalone убран — на Next.js 16 standalone + Turbopack-build ломается:
+  // server.js стартует, но пустой reply на все запросы. Используем обычный next start
+  // (см. Dockerfile + package.json scripts.start).
 
   // Разрешаем запросы с ngrok-туннелей (в dev-режиме Next.js по умолчанию блокирует не-localhost)
   allowedDevOrigins: [
