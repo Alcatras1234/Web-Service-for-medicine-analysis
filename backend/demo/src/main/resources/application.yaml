@@ -49,8 +49,11 @@ spring:
 minio:
   access-key: minioadmin
   secret-key: minioadmin
-  bucketName: wsi-bucket 
-  url: http://localhost:9000
+  bucketName: wsi-bucket
+  # url — для presigned URL'ов которые отдаются в браузер. Должен быть тот адрес,
+  # по которому браузер видит MinIO. На сервере — публичный IP, локально — localhost.
+  url: ${MINIO_PUBLIC_URL:http://localhost:9000}
+  # internalUrl — для backend↔minio внутри docker compose сети.
   internalUrl: http://minio:9000
 
 server:

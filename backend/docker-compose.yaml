@@ -32,7 +32,9 @@ services:
     volumes:
       - eosinai-postgres-data:/var/lib/postgresql/data/pgdata
     ports:
-      - "5432:5432"
+      # Хост-порт смещён на +10000 чтобы не конфликтовать с системным postgres'ом на сервере.
+      # Внутри docker-сети backend всё равно ходит на 5432 (см. application.yaml).
+      - "15432:5432"
     networks:
       - eosinai-net
     healthcheck:
@@ -55,7 +57,7 @@ services:
       PGADMIN_DEFAULT_EMAIL: admin@admin.com
       PGADMIN_DEFAULT_PASSWORD: admin
     ports:
-      - "5050:80"
+      - "15050:80"
     depends_on:
       - eosinai-postgres
     volumes:
@@ -70,8 +72,10 @@ services:
     hostname: minio              # ← алиас, чтобы application.yaml не править
     command: server /data --console-address ":9001"
     ports:
-      - "9000:9000"
-      - "9001:9001"
+      # Левая часть — порт на хосте, правая — внутри контейнера.
+      # Меняем хост-порт чтобы не было конфликта с другим minio/nginx на сервере.
+      - "19000:9000"
+      - "19001:9001"
     networks:
       - eosinai-net
     environment:
@@ -86,8 +90,8 @@ services:
     container_name: eosinai-rabbitmq
     hostname: rabbitmq           # ← алиас
     ports:
-      - "5672:5672"
-      - "15672:15672"
+      - "15672:5672"     # AMQP
+      - "25672:15672"    # Management UI
     networks:
       - eosinai-net
     restart: unless-stopped
@@ -97,7 +101,7 @@ services:
     container_name: eosinai-redis
     hostname: redis              # ← алиас
     ports:
-      - "6379:6379"
+      - "16379:6379"
     command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru --save ""
     networks:
       - eosinai-net
@@ -193,7 +197,9 @@ services:
     container_name: eosinai-server
     hostname: server
     ports:
-      - "27:27"
+      # Spring Boot слушает 8080 внутри контейнера; снаружи отдаём через 18080
+      # чтобы не конфликтовать со штатным nginx/apache на сервере.
+      - "18080:8080"
     depends_on:
       - eosinai-postgres
       - eosinai-rabbitmq
@@ -204,4 +210,8 @@ services:
       - eosinai-net
     volumes:
       - eosinai-wsi-cache:/tmp/wsi-cache
+    environment:
+      # Публичный URL MinIO — отдаётся в браузер для presigned URL upload/download.
+      # Порт 19000 потому что 9000 на сервере уже занят другим сервисом.
+      - MINIO_PUBLIC_URL=http://188.126.62.18:19000
     restart: unless-stopped
