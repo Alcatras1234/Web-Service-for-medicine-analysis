@@ -33,6 +33,10 @@ export default function SlideViewerPage() {
   const [detections, setDetections] = useState<Detections | null>(null)
   const [showOverlay, setShowOverlay] = useState(false)
   const [overlayLoading, setOverlayLoading] = useState(false)
+  const [showHeatmap, setShowHeatmap] = useState(false)
+  const heatmapElemRef = useRef<HTMLImageElement | null>(null)
+  const hpfGaugeRef = useRef<HTMLDivElement | null>(null)
+  const [showHpfGauge, setShowHpfGauge] = useState(false)
 
   // Загружаем info + detections + инициализируем OpenSeadragon
   useEffect(() => {
@@ -74,12 +78,12 @@ export default function SlideViewerPage() {
       const detachScale = attachScaleBar(viewerRef.current, i.mppX, containerRef.current)
       ;(viewerRef.current as any).__detachScale = detachScale
 
-      // Подсветка HPF max — пульсирующая красная рамка + автоцентр
+      // Подсветка HPF max — пульсирующая ЗЕЛЁНАЯ рамка + автоцентр
       if (d && d.maxHpfCount > 0 && i.mppX) {
         const win = Math.round(Math.sqrt(0.3) * 1000 / i.mppX)
         const overlay = document.createElement("div")
-        overlay.style.border = "4px solid #ff2030"
-        overlay.style.boxShadow = "0 0 18px rgba(255,30,40,0.85), inset 0 0 12px rgba(255,30,40,0.4)"
+        overlay.style.border = "4px solid #00cc44"
+        overlay.style.boxShadow = "0 0 18px rgba(0,200,70,0.85), inset 0 0 12px rgba(0,200,70,0.35)"
         overlay.style.animation = "hpf-pulse 1.6s ease-in-out infinite"
         overlay.title = `HPF max: ${d.maxHpfCount} эозинофилов`
 
@@ -88,8 +92,8 @@ export default function SlideViewerPage() {
           style.id = "hpf-pulse-style"
           style.textContent = `
             @keyframes hpf-pulse {
-              0%, 100% { box-shadow: 0 0 18px rgba(255,30,40,0.85), inset 0 0 12px rgba(255,30,40,0.4); }
-              50%      { box-shadow: 0 0 28px rgba(255,30,40,1.0),  inset 0 0 20px rgba(255,30,40,0.6); }
+              0%, 100% { box-shadow: 0 0 18px rgba(0,200,70,0.85), inset 0 0 12px rgba(0,200,70,0.35); }
+              50%      { box-shadow: 0 0 32px rgba(0,220,80,1.0),  inset 0 0 22px rgba(0,200,70,0.55); }
             }
           `
           document.head.appendChild(style)
@@ -115,22 +119,34 @@ export default function SlideViewerPage() {
             const dData = await dRes.json()
             const dets = dData.detections || []
             if (dets.length > 0 && dets.length < 5000) {
-              const r = 6
               dets.forEach((dt: any) => {
-                const dot = document.createElement("div")
-                dot.dataset.detection = "1"
-                dot.style.width = "10px"
-                dot.style.height = "10px"
-                dot.style.borderRadius = "50%"
-                dot.style.background = dt.cls === "eos" ? "rgba(255,80,80,0.8)" : "rgba(255,200,0,0.8)"
-                dot.style.border = "1px solid white"
-                dot.style.cursor = "help"
+                // Bbox вокруг каждой клетки — реальные размеры из x1,y1,x2,y2
+                const x1 = dt.x1 ?? (dt.cx - 10)
+                const y1 = dt.y1 ?? (dt.cy - 10)
+                const x2 = dt.x2 ?? (dt.cx + 10)
+                const y2 = dt.y2 ?? (dt.cy + 10)
+                const w = Math.max(1, x2 - x1)
+                const h = Math.max(1, y2 - y1)
+
+                const box = document.createElement("div")
+                box.dataset.detection = "1"
+                const isIntact = dt.cls === "eos"
+                box.style.boxSizing = "border-box"
+                box.style.border = isIntact
+                  ? "2px solid rgba(255,40,40,0.95)"
+                  : "2px solid rgba(255,200,0,0.95)"
+                box.style.background = isIntact
+                  ? "rgba(255,40,40,0.12)"
+                  : "rgba(255,200,0,0.12)"
+                box.style.borderRadius = "2px"
+                box.style.cursor = "help"
                 const conf = typeof dt.conf === "number" ? dt.conf.toFixed(2) : "—"
-                const cl = dt.cls === "eos" ? "intact" : (dt.cls === "eosg" ? "granulated" : dt.cls)
-                dot.title = `${cl}  ·  conf ${conf}  ·  (${Math.round(dt.cx)}, ${Math.round(dt.cy)}) px`
+                const cl = isIntact ? "intact" : (dt.cls === "eosg" ? "granulated" : dt.cls)
+                box.title = `${cl}  ·  conf ${conf}  ·  bbox ${Math.round(w)}×${Math.round(h)} px`
+
                 viewerRef.current.addOverlay({
-                  element: dot,
-                  location: viewerRef.current.viewport.imageToViewportRectangle(dt.cx - r, dt.cy - r, r * 2, r * 2),
+                  element: box,
+                  location: viewerRef.current.viewport.imageToViewportRectangle(x1, y1, w, h),
                 })
               })
               setShowOverlay(true)
@@ -147,6 +163,82 @@ export default function SlideViewerPage() {
       viewerRef.current?.destroy?.()
     }
   }, [slideId])
+
+  function toggleHpfGauge() {
+    const v = viewerRef.current
+    if (!v || !info?.mppX) return
+
+    if (showHpfGauge && hpfGaugeRef.current) {
+      v.removeOverlay(hpfGaugeRef.current)
+      hpfGaugeRef.current = null
+      setShowHpfGauge(false)
+      return
+    }
+
+    // 0.3 мм² → сторона √0.3 мм × 1000 / mpp = пиксели на WSI
+    const sidePx = Math.round(Math.sqrt(0.3) * 1000 / info.mppX)
+    // Центрируем в текущем viewport
+    const center = v.viewport.getCenter()
+    const centerImg = v.viewport.viewportToImageCoordinates(center)
+
+    const box = document.createElement("div")
+    box.style.border = "3px dashed #00cc44"
+    box.style.background = "rgba(0,200,70,0.10)"
+    box.style.boxShadow = "0 0 12px rgba(0,200,70,0.5)"
+    box.style.pointerEvents = "none"
+    box.style.boxSizing = "border-box"
+    // Подпись внутри
+    const label = document.createElement("div")
+    label.textContent = `0.3 мм² (${sidePx} × ${sidePx} px)`
+    label.style.position = "absolute"
+    label.style.top = "4px"
+    label.style.left = "4px"
+    label.style.padding = "2px 6px"
+    label.style.background = "rgba(0,200,70,0.9)"
+    label.style.color = "white"
+    label.style.fontSize = "11px"
+    label.style.fontWeight = "bold"
+    label.style.borderRadius = "3px"
+    box.appendChild(label)
+
+    hpfGaugeRef.current = box
+    v.addOverlay({
+      element: box,
+      location: v.viewport.imageToViewportRectangle(
+        centerImg.x - sidePx / 2,
+        centerImg.y - sidePx / 2,
+        sidePx, sidePx
+      ),
+    })
+    setShowHpfGauge(true)
+  }
+
+  function toggleHeatmap() {
+    const v = viewerRef.current
+    if (!v || !info || !detections?.jobId) return
+
+    if (showHeatmap && heatmapElemRef.current) {
+      v.removeOverlay(heatmapElemRef.current)
+      heatmapElemRef.current = null
+      setShowHeatmap(false)
+      return
+    }
+
+    // Накладываем heatmap.png в координатах всего WSI с полупрозрачностью
+    const img = document.createElement("img")
+    img.src = `/api/reports/${detections.jobId}/heatmap`
+    img.style.opacity = "0.55"
+    img.style.mixBlendMode = "multiply"
+    img.style.pointerEvents = "none"
+    img.style.width = "100%"
+    img.style.height = "100%"
+    heatmapElemRef.current = img
+    v.addOverlay({
+      element: img,
+      location: v.viewport.imageToViewportRectangle(0, 0, info.width, info.height),
+    })
+    setShowHeatmap(true)
+  }
 
   function zoomToHpf() {
     if (!viewerRef.current || !detections || !info?.mppX) return
@@ -179,22 +271,32 @@ export default function SlideViewerPage() {
       const sample = dets.length > MAX_OVERLAY
         ? dets.filter((_, i) => i % Math.ceil(dets.length / MAX_OVERLAY) === 0)
         : dets
-      const r = 6 // радиус кружка в пикселях изображения
       sample.forEach((d: any) => {
-        const dot = document.createElement("div")
-        dot.dataset.detection = "1"
-        dot.style.width = "10px"
-        dot.style.height = "10px"
-        dot.style.borderRadius = "50%"
-        dot.style.background = d.cls === "eos" ? "rgba(255,80,80,0.7)" : "rgba(255,200,0,0.7)"
-        dot.style.border = "1px solid white"
-        dot.style.cursor = "help"
+        const x1 = d.x1 ?? (d.cx - 10)
+        const y1 = d.y1 ?? (d.cy - 10)
+        const x2 = d.x2 ?? (d.cx + 10)
+        const y2 = d.y2 ?? (d.cy + 10)
+        const w = Math.max(1, x2 - x1)
+        const h = Math.max(1, y2 - y1)
+
+        const box = document.createElement("div")
+        box.dataset.detection = "1"
+        const isIntact = d.cls === "eos"
+        box.style.boxSizing = "border-box"
+        box.style.border = isIntact
+          ? "2px solid rgba(255,40,40,0.95)"
+          : "2px solid rgba(255,200,0,0.95)"
+        box.style.background = isIntact
+          ? "rgba(255,40,40,0.10)"
+          : "rgba(255,200,0,0.10)"
+        box.style.borderRadius = "2px"
+        box.style.cursor = "help"
         const conf = typeof d.conf === "number" ? d.conf.toFixed(2) : "—"
-        const cl = d.cls === "eos" ? "intact" : (d.cls === "eosg" ? "granulated" : d.cls)
-        dot.title = `${cl}  ·  conf ${conf}  ·  (${Math.round(d.cx)}, ${Math.round(d.cy)}) px`
+        const cl = isIntact ? "intact" : (d.cls === "eosg" ? "granulated" : d.cls)
+        box.title = `${cl}  ·  conf ${conf}  ·  bbox ${Math.round(w)}×${Math.round(h)} px`
         v.addOverlay({
-          element: dot,
-          location: v.viewport.imageToViewportRectangle(d.cx - r, d.cy - r, r * 2, r * 2),
+          element: box,
+          location: v.viewport.imageToViewportRectangle(x1, y1, w, h),
         })
       })
       setShowOverlay(true)
@@ -224,6 +326,14 @@ export default function SlideViewerPage() {
             <button onClick={zoomToHpf}
                     className="ml-auto px-3 py-1 bg-red-700 rounded text-sm">
               К HPF max
+            </button>
+            <button onClick={toggleHpfGauge}
+                    className="px-3 py-1 bg-green-700 rounded text-sm">
+              {showHpfGauge ? "Скрыть 0.3 мм²" : "Показать 0.3 мм²"}
+            </button>
+            <button onClick={toggleHeatmap}
+                    className="px-3 py-1 bg-purple-700 rounded text-sm">
+              {showHeatmap ? "Скрыть heatmap" : "Heatmap"}
             </button>
             <button onClick={toggleOverlay} disabled={overlayLoading}
                     className="px-3 py-1 bg-slate-700 rounded text-sm">

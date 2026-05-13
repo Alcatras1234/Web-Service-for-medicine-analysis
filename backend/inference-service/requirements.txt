@@ -1,7 +1,13 @@
-onnxruntime-gpu==1.17.0
 fastapi
 uvicorn[standard]
 numpy<2
 opencv-python-headless
 pillow
 pydantic
+
+# Triton inference client (gRPC)
+tritonclient[grpc]==2.42.0
+
+# Локальный onnxruntime больше не нужен — модель крутится на удалённом Triton.
+# Если хочется fallback'a на CPU/GPU локально — раскомментируй:
+# onnxruntime-gpu==1.17.0

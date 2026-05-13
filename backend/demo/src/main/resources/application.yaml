@@ -29,6 +29,23 @@ spring:
       simple:
         prefetch: 32
 
+  data:
+    redis:
+      host: redis
+      port: 6379
+      timeout: 2s
+      lettuce:
+        pool:
+          max-active: 16
+          max-idle: 8
+          min-idle: 2
+  # Spring Cache: пока используем in-memory (concurrent map) — стабильнее на старте.
+  # Redis для кеша оставлен в инфре, но не используется — Jackson typing с разнотиповыми
+  # Map<String,Object> и записями SlideInfo не помещается в одну конфигурацию сериализатора.
+  # Если нужен распределённый кеш — поменять на `redis` и доводить CacheConfig.
+  cache:
+    type: simple
+
 minio:
   access-key: minioadmin
   secret-key: minioadmin

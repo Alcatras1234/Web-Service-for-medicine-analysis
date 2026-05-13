@@ -1,9 +1,11 @@
 package com.e.demo.Controllers;
 
+import com.e.demo.config.CacheConfig;
 import com.e.demo.entity.Job;
 import com.e.demo.repository.JobRepository;
 import com.e.demo.server.DetectionStore;
 import com.e.demo.server.TileService;
+import org.springframework.cache.annotation.Cacheable;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.CacheControl;
 import org.springframework.http.MediaType;
@@ -80,7 +82,8 @@ public class TileController {
         }
     }
 
-    /** Сводка детекций — координаты HPF max, agg counts, diagnosis. */
+    /** Сводка детекций — координаты HPF max, agg counts, diagnosis.
+     *  (Кеш убран: ResponseEntity + 404 не дружит с RedisCache десериализацией.) */
     @GetMapping("/slides/{slideId}/detections")
     public ResponseEntity<?> detections(@PathVariable Integer slideId) {
         Job job = jobRepository.findFirstBySlideIdOrderByCreatedAtDesc(slideId).orElse(null);

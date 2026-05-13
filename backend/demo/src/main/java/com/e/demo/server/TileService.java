@@ -1,8 +1,10 @@
 package com.e.demo.server;
 
+import com.e.demo.config.CacheConfig;
 import com.e.demo.entity.Slide;
 import com.e.demo.repository.SlideRepository;
 import com.e.demo.wsi.BioFormatsWsiReader;
+import org.springframework.cache.annotation.Cacheable;
 import io.minio.GetObjectArgs;
 import io.minio.MinioClient;
 import io.minio.PutObjectArgs;
@@ -45,6 +47,10 @@ public class TileService {
     private static final int TILE_SIZE = 256;
     private static final String IMAGES_BUCKET = "wsi-bucket";
 
+    // Порог: если средний RGB региона выше — считаем тайл белым/фоновым.
+    // На high-res тайлах фон → возвращаем кэшированный белый, не тратим CPU/диск.
+    private static final double WHITE_RGB_THRESHOLD = 240.0;
+
     private final MinioClient minioClient;
     private final SlideRepository slideRepo;
     private final Path cacheDir;
@@ -77,6 +83,8 @@ public class TileService {
     public record SlideInfo(int width, int height, int tileSize, int maxLevel,
                             Double mppX, Double mppY) {}
 
+    // Spring Cache разворачивает Optional → в #result уже сам SlideInfo (или null).
+    @Cacheable(value = CacheConfig.CACHE_SLIDE_INFO, key = "#slideId", unless = "#result == null")
     public Optional<SlideInfo> getInfo(int slideId) {
         return slideRepo.findActiveById(slideId).map(s -> {
             int w = s.getWidthPx() != null ? s.getWidthPx() : 0;
@@ -181,6 +189,14 @@ public class TileService {
 
             BufferedImage region = reader.readRegion((int) sx, (int) sy, (int) sw, (int) sh);
 
+            // Quick-skip: на high-res уровнях, если регион белый — отдаём cached white tile
+            // вместо JPEG-кодирования. Сэкономит CPU + место в MinIO кэше.
+            // Для low-res (level <= maxLevel/2) рендерим всегда — даже фон даёт overview.
+            if (level > maxLevel / 2 && isMostlyWhite(region)) {
+                region.flush();
+                return whiteTile();
+            }
+
             // Финальный downscale до TILE_SIZE × TILE_SIZE
             int extraScale = desiredScale / bestDownsample;
             int outW = (int) Math.max(1, sw / Math.max(1, extraScale));
@@ -200,6 +216,20 @@ public class TileService {
             ImageIO.write(out, "jpg", baos);
             return baos.toByteArray();
         }
+    }
+
+    /** Сэмплируем каждый 4-й пиксель — быстро. Если средний RGB > 240 — фон. */
+    private boolean isMostlyWhite(BufferedImage img) {
+        int w = img.getWidth(), h = img.getHeight();
+        long sum = 0; long count = 0;
+        for (int y = 0; y < h; y += 4) {
+            for (int x = 0; x < w; x += 4) {
+                int rgb = img.getRGB(x, y);
+                sum += ((rgb >> 16) & 0xFF) + ((rgb >> 8) & 0xFF) + (rgb & 0xFF);
+                count += 3;
+            }
+        }
+        return count > 0 && (double) sum / count > WHITE_RGB_THRESHOLD;
     }
 
     private byte[] whiteTile() throws Exception {

@@ -1,9 +1,12 @@
 package com.e.demo.Controllers;
 
+import com.e.demo.config.CacheConfig;
 import com.e.demo.dto.WsiUploadedEvent;
 import com.e.demo.entity.Case;
 import com.e.demo.entity.Job;
 import com.e.demo.entity.Slide;
+import org.springframework.cache.annotation.CacheEvict;
+import org.springframework.cache.annotation.Cacheable;
 import com.e.demo.repository.CaseRepository;
 import com.e.demo.repository.CaseSignoffRepository;
 import com.e.demo.repository.JobRepository;
@@ -54,7 +57,8 @@ public class FileController {
         this.audit = audit;
     }
 
-    private Integer currentUserId() {
+    // public — нужен для SpEL в @Cacheable(key="#root.target.currentUserId()")
+    public Integer currentUserId() {
         Authentication auth = SecurityContextHolder.getContext().getAuthentication();
         if (auth == null || auth.getPrincipal() == null) {
             throw new RuntimeException("Not authenticated");
@@ -71,8 +75,9 @@ public class FileController {
         return Map.of("uploadUrl", url, "objectKey", objectKey);
     }
 
-    // Шаг 2: подтвердить загрузку и запустить обработку
+    // Шаг 2: подтвердить загрузку и запустить обработку. Инвалидирует кэш списка слайдов юзера.
     @PostMapping("/confirm-upload")
+    @CacheEvict(value = CacheConfig.CACHE_SLIDES_BY_USER, key = "#root.target.currentUserId()")
     public ResponseEntity<Map<String, Object>> confirmUpload(
             @RequestBody Map<String, String> body) {
 
@@ -134,6 +139,7 @@ public class FileController {
 
     /** E8: soft-delete слайда. 409 если кейс уже подписан. */
     @DeleteMapping("/slides/{id}")
+    @CacheEvict(value = CacheConfig.CACHE_SLIDES_BY_USER, key = "#root.target.currentUserId()")
     public ResponseEntity<?> deleteSlide(@PathVariable Integer id) {
         Integer userId = currentUserId();
         Slide slide = slideRepository.findActiveById(id).orElse(null);
@@ -149,9 +155,11 @@ public class FileController {
         return ResponseEntity.noContent().build();
     }
 
-    // Список слайдов текущего пользователя с актуальным статусом и jobId
+    // Список слайдов текущего пользователя с актуальным статусом и jobId. Кэшируется 5 сек.
+    // Возвращаем чистый List (а не ResponseEntity) — иначе RedisCache не сможет десериализовать.
     @GetMapping("/slides")
-    public ResponseEntity<List<Map<String, Object>>> getSlides() {
+    @Cacheable(value = CacheConfig.CACHE_SLIDES_BY_USER, key = "#root.target.currentUserId()")
+    public List<Map<String, Object>> getSlides() {
         Integer userId = currentUserId();
 
         List<Slide> slides = slideRepository.findByUserIdOrderByCreatedAtDesc(userId);
@@ -188,6 +196,6 @@ public class FileController {
             return m;
         }).toList();
 
-        return ResponseEntity.ok(result);
+        return result;
     }
 }

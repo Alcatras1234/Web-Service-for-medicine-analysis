@@ -194,6 +194,10 @@ export default function DashboardPage() {
             </span>
           </div>
           <div className="flex items-center gap-2">
+            <Button variant="ghost" onClick={() => router.push("/patients")}
+                    className="text-slate-700 hover:text-blue-700">
+              Пациенты
+            </Button>
             <Button variant="ghost" onClick={() => router.push("/cases")}
                     className="text-slate-700 hover:text-blue-700">
               Кейсы

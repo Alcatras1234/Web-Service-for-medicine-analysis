@@ -1,9 +1,12 @@
 package com.e.demo.Controllers;
 
+import com.e.demo.config.CacheConfig;
 import com.e.demo.entity.Case;
 import com.e.demo.entity.CaseSignoff;
 import com.e.demo.entity.Job;
 import com.e.demo.entity.Slide;
+import org.springframework.cache.annotation.CacheEvict;
+import org.springframework.cache.annotation.Cacheable;
 import com.e.demo.repository.CaseRepository;
 import com.e.demo.repository.CaseSignoffRepository;
 import com.e.demo.repository.JobRepository;
@@ -43,7 +46,7 @@ public class CaseController {
         this.audit = audit;
     }
 
-    private Integer currentUserId() {
+    public Integer currentUserId() {
         Authentication auth = SecurityContextHolder.getContext().getAuthentication();
         if (auth == null || auth.getPrincipal() == null) {
             throw new RuntimeException("Not authenticated");
@@ -51,8 +54,9 @@ public class CaseController {
         return (Integer) auth.getPrincipal();
     }
 
-    /** Список активных кейсов текущего пользователя. */
+    /** Список активных кейсов текущего пользователя. Кэш 10 сек. */
     @GetMapping
+    @Cacheable(value = CacheConfig.CACHE_CASES_BY_USER, key = "#root.target.currentUserId()")
     public List<Map<String, Object>> list() {
         Integer uid = currentUserId();
         return caseRepo.findActiveByUser(uid).stream().map(this::toView).toList();
@@ -100,6 +104,7 @@ public class CaseController {
 
     /** Создание нового кейса. */
     @PostMapping
+    @CacheEvict(value = CacheConfig.CACHE_CASES_BY_USER, key = "#root.target.currentUserId()")
     public ResponseEntity<Map<String, Object>> create(@RequestBody Map<String, String> body) {
         Integer uid = currentUserId();
         Case c = new Case();
@@ -118,6 +123,7 @@ public class CaseController {
 
     /** E6/E8: sign-off — подпись кейса патоморфологом. */
     @PostMapping("/{id}/signoff")
+    @CacheEvict(value = CacheConfig.CACHE_CASES_BY_USER, key = "#root.target.currentUserId()")
     public ResponseEntity<?> signoff(@PathVariable Integer id,
                                      @RequestBody Map<String, String> body) {
         Integer uid = currentUserId();
@@ -164,6 +170,7 @@ public class CaseController {
 
     /** E8: soft-delete кейса. 409 если уже подписан. */
     @DeleteMapping("/{id}")
+    @CacheEvict(value = CacheConfig.CACHE_CASES_BY_USER, key = "#root.target.currentUserId()")
     public ResponseEntity<?> delete(@PathVariable Integer id) {
         Integer uid = currentUserId();
         Case c = caseRepo.findActiveById(id).orElse(null);

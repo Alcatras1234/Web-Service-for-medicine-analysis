@@ -119,7 +119,23 @@ services:
       - "5672:5672"
       - "15672:15672"
     networks:
-      - dev 
+      - dev
+
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    hostname: redis
+    ports:
+      - "6379:6379"
+    # Памяти даём 256 МБ; LRU-эвикшн чтобы не падать при заполнении
+    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru --save ""
+    networks:
+      - dev
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
   inference:
       build:
         context: ./inference-service
@@ -129,17 +145,16 @@ services:
         - "8500:8500"
       networks:
         - dev
-      # GPU для NVIDIA Container Toolkit
+      # Модель крутится на удалённом Triton — локальный GPU не нужен.
+      # Этот сервис теперь препроцессинг + НМС/маски/CC + прокси к Triton по gRPC.
       environment:
-        - NVIDIA_VISIBLE_DEVICES=all
-        - MODEL_PATH=/app/triton-models/eosin_yolo/1/best.onnx
-      deploy:
-        resources:
-          reservations:
-            devices:
-              - driver: nvidia
-                count: 1
-                capabilities: [gpu]
+        - TRITON_URL=188.126.62.18:18001
+        - TRITON_MODEL_NAME=eosinophil_pipeline
+        - TRITON_TIMEOUT_S=60
+        - CONF_THRESH=0.25
+        - IOU_THRESH=0.45
+        - INPUT_SIZE=448
+        - NUM_CLASSES=2
 
 volumes:
   auth_data:

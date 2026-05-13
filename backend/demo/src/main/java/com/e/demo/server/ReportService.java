@@ -409,11 +409,15 @@ public class ReportService {
         int totalEos    = job.getTotalEosinophilCount() != null ? job.getTotalEosinophilCount() : 0;
         int peakIntact  = job.getMaxHpfIntact()         != null ? job.getMaxHpfIntact()         : 0;
         int peakSum     = job.getMaxHpfCount()          != null ? job.getMaxHpfCount()          : 0;
+        int peakGranul  = Math.max(0, peakSum - peakIntact);
+
         addMetricRow(t, "Всего эозинофилов на препарате", String.format("%d", totalEos));
-        addMetricRow(t, "PEC — intact (диагностический)",
-                String.format("%d / HPF  (%s)", peakIntact,
-                        peakIntact >= EOE_THRESHOLD ? "≥ порога 15" : "ниже порога 15"));
-        addMetricRow(t, "В том же окне HPF — всего (intact + granulated)",
+        addMetricRow(t, "Intact в HPF max (с ядром — диагностический показатель)",
+                String.format("%d / HPF  (%s порога 15)",
+                        peakIntact, peakIntact >= EOE_THRESHOLD ? "≥" : "<"));
+        addMetricRow(t, "Granulated в HPF max (без ядра / гранулы)",
+                String.format("%d / HPF  — справочно, признак активной дегрануляции", peakGranul));
+        addMetricRow(t, "Всего в окне HPF (intact + granulated)",
                 String.format("%d / HPF", peakSum));
 
         if (job.getMaxHpfX() != null && job.getMaxHpfY() != null) {
@@ -505,8 +509,11 @@ public class ReportService {
                 pdfImg.setHorizontalAlignment(HorizontalAlignment.CENTER);
                 doc.add(pdfImg);
                 doc.add(new Paragraph(String.format(
-                        "● intact: %d   ● granulated: %d   ·   зелёный квадрат — область, увеличенная ниже",
+                        "↑ ВСЁ HPF-окно 0.3 мм²:  ● intact %d   ● granulated %d   (это и есть диагностический PEC)",
                         counts[0], counts[1]))
+                        .setFontSize(9).setBold().setFontColor(new DeviceRgb(40, 40, 40))
+                        .setTextAlignment(TextAlignment.CENTER).setMarginBottom(2));
+                doc.add(new Paragraph("Зелёный квадрат внутри — фрагмент 250×250 µm (≈ 1/5 от HPF), показан крупно ниже")
                         .setFontSize(8).setFontColor(ColorConstants.GRAY)
                         .setTextAlignment(TextAlignment.CENTER).setMarginBottom(8));
             } else {
@@ -537,8 +544,12 @@ public class ReportService {
                 pdfImg.setHorizontalAlignment(HorizontalAlignment.CENTER);
                 doc.add(pdfImg);
                 doc.add(new Paragraph(String.format(
-                        "В этой области:  ● intact: %d   ● granulated: %d", counts[0], counts[1]))
-                        .setFontSize(8).setFontColor(ColorConstants.GRAY)
+                        "↑ Это ТОЛЬКО зелёный квадрат сверху (250×250 µm, 1/5 HPF):  ● intact %d   ● granulated %d",
+                        counts[0], counts[1]))
+                        .setFontSize(9).setFontColor(new DeviceRgb(40, 40, 40))
+                        .setTextAlignment(TextAlignment.CENTER));
+                doc.add(new Paragraph("Меньше клеток — потому что площадь в 5 раз меньше, а не потому что счёт врёт")
+                        .setFontSize(8).setFontColor(ColorConstants.GRAY).setItalic()
                         .setTextAlignment(TextAlignment.CENTER));
             }
         } catch (Exception e) {

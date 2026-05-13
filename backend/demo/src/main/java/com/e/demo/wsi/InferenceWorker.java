@@ -102,6 +102,11 @@ public class InferenceWorker {
         byJob.keySet().forEach(this::checkAndFinalizeJob);
     }
 
+    /** Пул для параллельного скачивания патчей из MinIO. 8 потоков — оптимально для S3-API. */
+    private static final java.util.concurrent.ExecutorService DOWNLOAD_POOL =
+            java.util.concurrent.Executors.newFixedThreadPool(8,
+                    r -> { Thread t = new Thread(r, "minio-dl"); t.setDaemon(true); return t; });
+
     private void processJobBatch(UUID jobId, List<PatchInferenceEvent> events) {
         List<Path> tmps = new ArrayList<>(events.size());
         List<InferenceHttpClient.PatchItemDto> items = new ArrayList<>(events.size());
@@ -109,41 +114,53 @@ public class InferenceWorker {
         List<UUID> failed = new ArrayList<>();
 
         try {
+            // 1) Параллельно скачиваем все патчи батча из MinIO — это снимает основной bottleneck.
+            //    Раньше шло последовательно по ~200 ms/штука = 3 сек на батч из 16.
+            //    Теперь — параллельно в 8 потоков → ~400 ms на батч.
+            record Downloaded(PatchInferenceEvent ev, Path tmp, BufferedImage img, PatchTask task) {}
+            List<java.util.concurrent.Future<Downloaded>> futures = new ArrayList<>(events.size());
             for (PatchInferenceEvent ev : events) {
-                Path tmp = null;
-                try {
-                    tmp = Files.createTempFile("patch-", ".png");
+                futures.add(DOWNLOAD_POOL.submit(() -> {
+                    Path tmp = Files.createTempFile("patch-", ".png");
                     downloadToFile(ev.s3Path(), tmp);
                     BufferedImage img = ImageIO.read(tmp.toFile());
-
                     PatchTask task = patchTaskRepository.findById(ev.patchId()).orElseThrow();
-                    int patchX = task.getX();
-                    int patchY = task.getY();
+                    return new Downloaded(ev, tmp, img, task);
+                }));
+            }
+
+            // 2) Подбираем результаты и формируем DTO для отправки в Triton.
+            //    BioFormats / encode тензора держим в основном треде — это уже быстро.
+            for (java.util.concurrent.Future<Downloaded> f : futures) {
+                Downloaded d = null;
+                try {
+                    d = f.get();
+                    int patchX = d.task.getX();
+                    int patchY = d.task.getY();
 
                     boolean edgeLeft   = patchX == 0;
                     boolean edgeTop    = patchY == 0;
                     boolean edgeRight  = !patchTaskRepository
-                        .existsByJobIdAndXAndY(ev.jobId(), patchX + PATCH_STRIDE, patchY);
+                        .existsByJobIdAndXAndY(d.ev.jobId(), patchX + PATCH_STRIDE, patchY);
                     boolean edgeBottom = !patchTaskRepository
-                        .existsByJobIdAndXAndY(ev.jobId(), patchX, patchY + PATCH_STRIDE);
+                        .existsByJobIdAndXAndY(d.ev.jobId(), patchX, patchY + PATCH_STRIDE);
 
-                    byte[] tensor = toRgbHWC(img, MODEL_SIZE, MODEL_SIZE);
+                    byte[] tensor = toRgbHWC(d.img, MODEL_SIZE, MODEL_SIZE);
                     String b64 = Base64.getEncoder().encodeToString(tensor);
-                    String pid = ev.patchId().toString();
+                    String pid = d.ev.patchId().toString();
 
                     items.add(new InferenceHttpClient.PatchItemDto(
                         pid, b64, PATCH_WSI_SIZE, OVERLAP_PX,
                         edgeLeft, edgeTop, edgeRight, edgeBottom
                     ));
-                    patchIdMap.put(pid, ev.patchId());
-                    tmps.add(tmp);
-                    tmp = null;
+                    patchIdMap.put(pid, d.ev.patchId());
+                    tmps.add(d.tmp);
                 } catch (Exception e) {
-                    log.error("Patch prep failed: {}", ev.patchId(), e);
-                    failed.add(ev.patchId());
-                } finally {
-                    if (tmp != null) {
-                        try { Files.deleteIfExists(tmp); } catch (IOException ignored) {}
+                    UUID failedId = d != null ? d.ev.patchId() : null;
+                    log.error("Patch prep failed: {}", failedId, e);
+                    if (failedId != null) failed.add(failedId);
+                    if (d != null && d.tmp != null) {
+                        try { Files.deleteIfExists(d.tmp); } catch (IOException ignored) {}
                     }
                 }
             }
@@ -177,9 +194,13 @@ public class InferenceWorker {
                     for (UUID pid : patchIdMap.values()) {
                         if (!handled.contains(pid)) failed.add(pid);
                     }
-                    log.info("Batch inference: job={} model={} sent={} ok={} failed={}",
+                    // Прогресс job'а: сколько уже не PENDING (т.е. готово)
+                    long done = patchTaskRepository.countByJobIdAndStatusNotIn(jobId, List.of("PENDING"));
+                    long total = patchTaskRepository.countByJobIdAndStatus(jobId, "PENDING") + done;
+                    log.info("Batch inference: job={} model={} sent={} ok={} failed={}  ·  PROGRESS {}/{} ({}%)",
                         jobId, resp.modelVersion(), items.size(), handled.size(),
-                        items.size() - handled.size());
+                        items.size() - handled.size(),
+                        done, total, total == 0 ? 0 : (done * 100 / total));
                 } catch (Exception e) {
                     log.error("Batch inference HTTP failed: job={} size={}", jobId, items.size(), e);
                     failed.addAll(patchIdMap.values());

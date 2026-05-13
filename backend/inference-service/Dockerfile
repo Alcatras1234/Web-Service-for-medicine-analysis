@@ -1,20 +1,19 @@
-FROM nvidia/cuda:11.8.0-cudnn8-runtime-ubuntu22.04
+# Лёгкий python-base — модель крутится на удалённом Triton, локальный CUDA не нужен.
+FROM python:3.11-slim
 
 WORKDIR /app
 
+# Системные зависимости для opencv-python-headless
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-       python3 python3-pip python3-venv \
-    && rm -rf /var/lib/apt/lists/* \
-    && ln -sf python3 /usr/bin/python \
-    && ln -sf pip3 /usr/bin/pip
+       libglib2.0-0 libsm6 libxext6 libxrender1 \
+    && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-ENV MODEL_PATH=/app/triton-models/eosin_yolo/1/best.onnx
 EXPOSE 8500
 
 CMD ["python", "-m", "uvicorn", "main:app", \

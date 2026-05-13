@@ -1,8 +1,10 @@
 package com.e.demo.Controllers;
 
+import com.e.demo.config.CacheConfig;
 import com.e.demo.entity.Job;
 import com.e.demo.repository.JobRepository;
 import com.e.demo.server.ReportService;
+import org.springframework.cache.annotation.Cacheable;
 import io.minio.GetObjectArgs;
 import io.minio.MinioClient;
 import lombok.RequiredArgsConstructor;
@@ -36,7 +38,9 @@ public class ReportController {
         this.minioClient = minioClient;
     }
 
-    // GET /api/reports/{jobId}/status — статус джоба + диагноз
+    // GET /api/reports/{jobId}/status — статус джоба + диагноз.
+    // (Кеширование убрано: ResponseEntity + 404 плохо сериализуется. Если хочется кешить —
+    //  вынеси логику в сервис, отдельный @Cacheable на Map<String,Object>.)
     @GetMapping("/{jobId}/status")
     public ResponseEntity<?> getStatus(@PathVariable UUID jobId) {
         return jobRepository.findById(jobId)
