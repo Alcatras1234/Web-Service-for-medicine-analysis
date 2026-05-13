@@ -223,16 +223,18 @@ services:
       - MINIO_PUBLIC_URL=http://minio:9000
     restart: unless-stopped
 
-  # Next.js фронт — единственная штука, открытая наружу через порт 27.
-  # Всё API (включая аплоад файлов) идёт через route handlers Next.js → Spring (server:8080).
+  # Next.js фронт. Снаружи доступен через ngrok-туннель (см. eosinai-ngrok ниже).
+  # Если когда-нибудь админ откроет порт наружу — раскомментируй ports.
   eosinai-frontend:
     build:
       context: ../frontend/my-app
       dockerfile: Dockerfile
     container_name: eosinai-frontend
     hostname: frontend
-    ports:
-      - "27:3000"
+    expose:
+      - "3000"
+    # ports:
+    #   - "27:3000"
     depends_on:
       - eosinai-server
     networks:
@@ -241,4 +243,24 @@ services:
       - NODE_ENV=production
       # Внутри docker-сети Spring доступен по имени контейнера server.
       - BACKEND_URL=http://server:8080
+    restart: unless-stopped
+
+  # ngrok — публичный туннель в облако ngrok, наружу пробрасывает frontend:3000.
+  # Не требует открытых портов на сервере (только исходящий интернет).
+  # URL виден в логах: docker compose logs eosinai-ngrok | grep "started tunnel"
+  # Web UI ngrok доступен изнутри docker-сети на http://ngrok:4040 (но наружу нет).
+  eosinai-ngrok:
+    image: ngrok/ngrok:latest
+    container_name: eosinai-ngrok
+    hostname: ngrok
+    command:
+      - "http"
+      - "frontend:3000"
+      - "--log=stdout"
+    environment:
+      - NGROK_AUTHTOKEN=${NGROK_AUTHTOKEN}
+    depends_on:
+      - eosinai-frontend
+    networks:
+      - eosinai-net
     restart: unless-stopped
