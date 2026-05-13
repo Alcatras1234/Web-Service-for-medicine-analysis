@@ -234,7 +234,7 @@ services:
     expose:
       - "3000"
     # ports:
-    #   - "27:3000"
+    #   - "3000:27"
     depends_on:
       - eosinai-server
     networks:
@@ -258,7 +258,7 @@ services:
       - "frontend:3000"
       - "--log=stdout"
     environment:
-      - NGROK_AUTHTOKEN=${NGROK_AUTHTOKEN}
+      - NGROK_AUTHTOKEN=3AOgmmodiTBdIAWRB1Q7N0lNDtK_5E3ekTK91ahY5K4aB7Y2M
     depends_on:
       - eosinai-frontend
     networks:
