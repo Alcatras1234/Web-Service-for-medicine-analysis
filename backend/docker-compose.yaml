@@ -205,7 +205,7 @@ services:
     ports:
       # Spring Boot слушает 8080 внутри контейнера; снаружи отдаём через 18080
       # чтобы не конфликтовать со штатным nginx/apache на сервере.
-      - "18080:8080"
+      - "27:8080"
     depends_on:
       - eosinai-postgres
       - eosinai-rabbitmq
@@ -219,5 +219,5 @@ services:
     environment:
       # Публичный URL MinIO — отдаётся в браузер для presigned URL upload/download.
       # Порт 19000 потому что 9000 на сервере уже занят другим сервисом.
-      - MINIO_PUBLIC_URL=http://188.126.62.18:19000
+      - MINIO_PUBLIC_URL=http://localhost:19000
     restart: unless-stopped
