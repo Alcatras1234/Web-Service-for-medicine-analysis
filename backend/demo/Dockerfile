@@ -22,11 +22,8 @@ FROM eclipse-temurin:21-jdk-alpine AS server_app
 
 WORKDIR /app
 
-# Копирование собранного JAR файла
+# Копирование собранного JAR файла (ресурсы из src/main/resources/* уже внутри jar'а)
 COPY --from=build /backend/target/*.jar /app/backend.jar
-
-# Копирование ресурсов
-COPY --from=build /backend/src/main/resources/templates /app/src/main/resources/templates
 
 # Открытие порта приложения
 EXPOSE 8080
