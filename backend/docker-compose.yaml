@@ -231,10 +231,10 @@ services:
       dockerfile: Dockerfile
     container_name: eosinai-frontend
     hostname: frontend
-    expose:
-      - "3000"
-    # ports:
-    #   - "3000:27"
+    # expose:
+    #   - "3000"
+    ports:
+      - "3000:27"
     depends_on:
       - eosinai-server
     networks:
