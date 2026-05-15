@@ -1,0 +1,29 @@
+# Prometheus конфиг для EosinAI. Скрейпит метрики Spring и Python inference
+# изнутри docker-сети eosinai-net по именам контейнеров.
+
+global:
+  scrape_interval:     15s
+  evaluation_interval: 15s
+  external_labels:
+    monitor: 'eosinai'
+
+scrape_configs:
+
+  # Spring Boot — Micrometer + actuator/prometheus
+  - job_name: 'spring'
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ['server:8080']
+        labels: { service: 'spring' }
+
+  # Python FastAPI inference-service
+  - job_name: 'inference'
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['inference:8500']
+        labels: { service: 'inference' }
+
+  # Сам Prometheus
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']

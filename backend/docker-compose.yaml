@@ -19,6 +19,8 @@ volumes:
   eosinai-postgres-data:
   eosinai-minio-data:
   eosinai-wsi-cache:
+  eosinai-prometheus-data:
+  eosinai-grafana-data:
 
 services:
 
@@ -214,4 +216,58 @@ services:
     depends_on:
       eosinai-frontend:
         condition: service_started
+      eosinai-prometheus:
+        condition: service_started
+      eosinai-grafana:
+        condition: service_started
+    restart: unless-stopped
+
+  # Prometheus — сбор метрик со Spring и inference-сервиса каждые 15 секунд.
+  # Доступен снаружи через nginx: http://188.126.62.18:27/prometheus/
+  eosinai-prometheus:
+    image: prom/prometheus:latest
+    container_name: eosinai-prometheus
+    hostname: eosinai-prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=15d
+      - --web.enable-lifecycle
+      # Запускаем под subpath /prometheus — Prometheus отдаёт ассеты под этим префиксом
+      - --web.external-url=http://188.126.62.18:27/prometheus/
+      - --web.route-prefix=/
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - eosinai-prometheus-data:/prometheus
+    networks:
+      eosinai-net:
+        ipv4_address: 10.27.0.20    # фикс-IP для nginx (он в network_mode: host)
+    restart: unless-stopped
+
+  # Grafana — UI для просмотра метрик. Datasource на Prometheus подключается
+  # автоматически (см. monitoring/grafana/provisioning/datasources/).
+  # Доступна снаружи через nginx: http://188.126.62.18:27/grafana/
+  # Готовые дашборды импортируй вручную через UI по ID:
+  #   4701 — JVM Micrometer (Spring)
+  #   10991 — RabbitMQ
+  eosinai-grafana:
+    image: grafana/grafana:latest
+    container_name: eosinai-grafana
+    hostname: eosinai-grafana
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+      # Subpath за nginx — иначе ассеты ищутся в корне, ломаются ссылки в UI.
+      - GF_SERVER_ROOT_URL=http://188.126.62.18:27/grafana/
+      - GF_SERVER_SERVE_FROM_SUB_PATH=true
+    volumes:
+      - eosinai-grafana-data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      - eosinai-prometheus
+    networks:
+      eosinai-net:
+        ipv4_address: 10.27.0.30    # фикс-IP для nginx
     restart: unless-stopped

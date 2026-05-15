@@ -1,0 +1,13 @@
+# Авто-загрузка дашбордов из /var/lib/grafana/dashboards.
+# Скачай JSON-ы готовых дашбордов с grafana.com и положи в backend/monitoring/grafana/dashboards/
+# Рекомендуемые ID: 4701 (JVM Micrometer), 10991 (RabbitMQ), 9628 (Postgres).
+apiVersion: 1
+providers:
+  - name: 'EosinAI'
+    orgId: 1
+    type: file
+    folder: ''
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    options:
+      path: /var/lib/grafana/dashboards

@@ -39,6 +39,8 @@ public class SecurityConfig implements WebMvcConfigurer {
                 // Публичные эндпоинты
                 .requestMatchers("/api/auth/login").permitAll()
                 .requestMatchers("/swagger-ui/**", "/v3/api-docs/**").permitAll()
+                // Prometheus скрейпит метрики; health/info — для liveness/readiness
+                .requestMatchers("/actuator/**").permitAll()
                 // Только ADMIN может создавать пользователей
                 .requestMatchers("/api/admin/**").hasRole("ADMIN")
                 // Всё остальное требует JWT

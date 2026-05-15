@@ -67,6 +67,18 @@ minio:
 
 server:
   port: 8080
+
+# Actuator + Prometheus метрики. Prometheus скрейпит /actuator/prometheus каждые 15 сек.
+# health/info полезны для liveness/readiness проб.
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+  metrics:
+    distribution:
+      percentiles-histogram:
+        http.server.requests: true   # гистограмма латенси HTTP-запросов
   tomcat:
     # большой WSI (1-3 GB) может литься минутами — Tomcat не должен резать тело
     max-swallow-size: -1

@@ -20,6 +20,7 @@ import tritonclient.grpc as triton_grpc
 from tritonclient.utils import np_to_triton_dtype
 from fastapi import FastAPI, HTTPException
 from PIL import Image
+from prometheus_fastapi_instrumentator import Instrumentator
 from pydantic import BaseModel
 
 logging.basicConfig(level=logging.INFO,
@@ -275,6 +276,10 @@ async def run_session(hwc_uint8: np.ndarray) -> dict:
 
 # ── FastAPI ───────────────────────────────────────────────────────────────────
 app = FastAPI()
+
+# Prometheus метрики на /metrics: requests_total, request_duration_seconds и т.д.
+# Сам instrumentator stateless, не влияет на бизнес-логику.
+Instrumentator().instrument(app).expose(app, endpoint="/metrics", include_in_schema=False)
 
 
 @app.on_event("startup")

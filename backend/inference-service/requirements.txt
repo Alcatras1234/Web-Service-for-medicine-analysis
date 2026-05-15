@@ -7,3 +7,6 @@ pydantic
 
 # Triton gRPC client — модель крутится на удалённом Triton по адресу из TRITON_URL.
 tritonclient[grpc]==2.42.0
+
+# Prometheus метрики через /metrics — латенси /infer_batch, число запросов, etc.
+prometheus-fastapi-instrumentator==7.0.0
