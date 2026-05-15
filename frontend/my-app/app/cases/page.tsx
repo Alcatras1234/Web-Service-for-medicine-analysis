@@ -66,20 +66,25 @@ export default function CasesPage() {
         </div>
       </header>
 
-      <div className="max-w-6xl mx-auto p-6">
-      <h1 className="text-2xl font-bold mb-4">Клинические кейсы</h1>
+      <div className="max-w-6xl mx-auto p-4 sm:p-6">
+      <h1 className="text-xl sm:text-2xl font-bold mb-4">Клинические кейсы</h1>
 
-      <form onSubmit={createCase} className="bg-white p-4 rounded shadow mb-6 flex gap-2">
-        <input className="border p-2 flex-1" placeholder="Patient ID"
+      {/* Форма: на мобиле вертикально, на десктопе в ряд */}
+      <form onSubmit={createCase}
+            className="bg-white p-4 rounded shadow mb-6 flex flex-col sm:flex-row gap-2">
+        <input className="border p-2 rounded flex-1 min-w-0" placeholder="Patient ID"
                value={patientId} onChange={e => setPatientId(e.target.value)} required />
-        <input className="border p-2 flex-1" placeholder="Название кейса (опц.)"
+        <input className="border p-2 rounded flex-1 min-w-0" placeholder="Название кейса (опц.)"
                value={name} onChange={e => setName(e.target.value)} />
-        <button className="bg-blue-600 text-white px-4 rounded" type="submit">Создать</button>
+        <button className="bg-blue-600 text-white px-4 py-2 rounded font-medium" type="submit">
+          Создать
+        </button>
       </form>
 
       {loading ? <div>Загрузка...</div> : (
-        <div className="bg-white rounded shadow">
-          <table className="w-full">
+        <div className="bg-white rounded shadow overflow-hidden">
+          {/* ───── Десктоп ≥ md: таблица ───── */}
+          <table className="w-full hidden md:table">
             <thead className="bg-slate-100">
               <tr>
                 <th className="text-left p-3">Patient ID</th>
@@ -114,6 +119,43 @@ export default function CasesPage() {
               )}
             </tbody>
           </table>
+
+          {/* ───── Мобайл < md: карточки ───── */}
+          <div className="md:hidden divide-y divide-slate-200">
+            {cases.length === 0 ? (
+              <div className="p-6 text-center text-slate-500 text-sm">Кейсов нет</div>
+            ) : (
+              cases.map(c => (
+                <div key={c.id} className="p-4 space-y-2">
+                  <div className="flex items-start justify-between gap-2">
+                    <Link href={`/cases/${c.id}`} className="text-blue-600 font-semibold text-base">
+                      {c.patientId}
+                    </Link>
+                    <button onClick={() => deleteCase(c.id)}
+                            className="text-red-600 text-sm shrink-0">Удалить</button>
+                  </div>
+                  <div className="text-slate-700 text-sm">
+                    {c.name || <span className="text-slate-400">— без названия —</span>}
+                  </div>
+                  <div className="flex items-center gap-2 flex-wrap text-sm">
+                    <span className={`px-2 py-0.5 rounded text-xs ${
+                      c.status === "SIGNED_OFF" ? "bg-green-100 text-green-800"
+                      : "bg-yellow-100 text-yellow-800"
+                    }`}>{c.status}</span>
+                    {c.diagnosis && (
+                      <span className={`px-2 py-0.5 rounded text-xs ${
+                        c.diagnosis === "POSITIVE" ? "bg-red-100 text-red-700"
+                        : "bg-emerald-100 text-emerald-700"
+                      }`}>{c.diagnosis}</span>
+                    )}
+                  </div>
+                  <div className="text-xs text-slate-500">
+                    {new Date(c.createdAt).toLocaleString()}
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
         </div>
       )}
       </div>

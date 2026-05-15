@@ -95,8 +95,9 @@ export default function CaseDetailPage() {
         </div>
       )}
 
-      <div className="bg-white rounded shadow mb-6">
-        <table className="w-full">
+      <div className="bg-white rounded shadow mb-6 overflow-hidden">
+        {/* ───── Десктоп ≥ md: таблица ───── */}
+        <table className="w-full hidden md:table">
           <thead className="bg-slate-100">
             <tr>
               <th className="text-left p-3">Файл</th>
@@ -138,6 +139,69 @@ export default function CaseDetailPage() {
             )}
           </tbody>
         </table>
+
+        {/* ───── Мобайл < md: карточки ───── */}
+        <div className="md:hidden divide-y divide-slate-200">
+          {data.slides.length === 0 ? (
+            <div className="p-6 text-center text-slate-500 text-sm">Слайдов нет</div>
+          ) : (
+            data.slides.map(s => (
+              <div key={s.id} className="p-4 space-y-2">
+                <div className="font-medium text-slate-900 break-all">{s.filename}</div>
+
+                <div className="grid grid-cols-2 gap-2 text-sm">
+                  <div>
+                    <div className="text-xs text-slate-500">Локация</div>
+                    <div>{s.biopsyLocation || "—"}</div>
+                  </div>
+                  <div>
+                    <div className="text-xs text-slate-500">Статус</div>
+                    <div>{s.jobStatus || s.status}</div>
+                  </div>
+                  <div>
+                    <div className="text-xs text-slate-500">Эозинофилов</div>
+                    <div className="font-mono">{s.totalEosinophils ?? "—"}</div>
+                  </div>
+                  <div>
+                    <div className="text-xs text-slate-500">Макс HPF</div>
+                    <div className={`font-mono ${
+                      typeof s.maxHpfCount === "number" && s.maxHpfCount >= 15
+                        ? "text-red-600 font-bold" : ""
+                    }`}>{s.maxHpfCount ?? "—"}</div>
+                  </div>
+                </div>
+
+                {s.diagnosis && (
+                  <div>
+                    <span className={`px-2 py-0.5 rounded text-xs ${
+                      s.diagnosis === "POSITIVE" ? "bg-red-100 text-red-700"
+                      : "bg-emerald-100 text-emerald-700"
+                    }`}>{s.diagnosis}</span>
+                  </div>
+                )}
+
+                {s.modelVersion && (
+                  <div className="text-xs text-slate-500 break-all">
+                    Модель: {s.modelVersion}
+                  </div>
+                )}
+
+                <div className="flex flex-wrap gap-3 pt-1">
+                  <Link href={`/cases/${id}/slides/${s.id}`}
+                        className="text-blue-600 text-sm">Посмотреть</Link>
+                  {s.jobId && (
+                    <>
+                      <a href={`/api/reports/${s.jobId}/pdf`} target="_blank" rel="noreferrer"
+                         className="text-blue-600 text-sm">PDF</a>
+                      <a href={`/api/reports/${s.jobId}/heatmap`} target="_blank" rel="noreferrer"
+                         className="text-blue-600 text-sm">Heatmap</a>
+                    </>
+                  )}
+                </div>
+              </div>
+            ))
+          )}
+        </div>
       </div>
 
       {data.signoff ? (
@@ -150,15 +214,17 @@ export default function CaseDetailPage() {
       ) : !signed && (
         <div className="bg-white rounded shadow p-4">
           <h3 className="font-semibold mb-2">Подписать кейс (sign-off)</h3>
-          <div className="flex gap-2 items-end">
-            <select value={diagnosis} onChange={e => setDiagnosis(e.target.value)} className="border p-2">
+          <div className="flex flex-col sm:flex-row gap-2 sm:items-end">
+            <select value={diagnosis} onChange={e => setDiagnosis(e.target.value)}
+                    className="border p-2 rounded">
               <option value="POSITIVE">POSITIVE</option>
               <option value="NEGATIVE">NEGATIVE</option>
               <option value="INCONCLUSIVE">INCONCLUSIVE</option>
             </select>
-            <input className="border p-2 flex-1" placeholder="Комментарий"
+            <input className="border p-2 rounded flex-1 min-w-0" placeholder="Комментарий"
                    value={comments} onChange={e => setComments(e.target.value)} />
-            <button onClick={signoff} className="bg-green-600 text-white px-4 py-2 rounded">
+            <button onClick={signoff}
+                    className="bg-green-600 text-white px-4 py-2 rounded font-medium">
               Подписать
             </button>
           </div>
