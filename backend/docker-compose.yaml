@@ -164,7 +164,7 @@ services:
     container_name: eosinai-frontend
     hostname: frontend
     ports:
-      - "27:27"
+      - "27:3000"
     depends_on:
       - eosinai-server
     networks:
