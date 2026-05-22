@@ -156,8 +156,8 @@ services:
       - MINIO_PUBLIC_URL=http://188.126.62.18:19000
     restart: unless-stopped
 
-  # Next.js фронт. Внешний доступ: http://188.126.62.18:13000
-  # Внутри контейнера Next.js слушает 13000 (PORT=13000 в Dockerfile + -p 13000 в start).
+  # Next.js фронт. Внешний доступ: http://188.126.62.18:27
+  # Внутри контейнера Next.js слушает 27 (привилегированный порт, в alpine root).
   eosinai-frontend:
     build:
       context: ../frontend/my-app
@@ -165,7 +165,7 @@ services:
     container_name: eosinai-frontend
     hostname: frontend
     ports:
-      - "13000:13000"
+      - "27:27"
     depends_on:
       - eosinai-server
     networks:
