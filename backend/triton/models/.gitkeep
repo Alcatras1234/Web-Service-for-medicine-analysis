@@ -1,0 +1,18 @@
+# Tritonserver model repository goes here.
+#
+# Expected structure for eosinophil_seg:
+#
+#   models/
+#     eosinophil_seg/
+#       config.pbtxt
+#       1/
+#         model.onnx
+#
+# Скачать модель с сервера (откуда она сейчас лежит):
+#   scp -r dbz@188.126.62.18:/home/dbz/triton_eosinophil/models/eosinophil_seg ./
+#
+# Файл model.onnx может быть большим (50-200 MB). Если упирается в лимит GitHub
+# (100 MB на файл) — используй Git LFS:
+#   git lfs install
+#   git lfs track "*.onnx"
+#   git add .gitattributes models/

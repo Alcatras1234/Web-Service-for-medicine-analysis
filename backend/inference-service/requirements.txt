@@ -5,9 +5,5 @@ opencv-python-headless
 pillow
 pydantic
 
-# Triton inference client (gRPC)
+# Triton gRPC client — модель крутится на удалённом Triton по адресу из TRITON_URL.
 tritonclient[grpc]==2.42.0
-
-# Локальный onnxruntime больше не нужен — модель крутится на удалённом Triton.
-# Если хочется fallback'a на CPU/GPU локально — раскомментируй:
-# onnxruntime-gpu==1.17.0

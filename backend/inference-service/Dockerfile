@@ -1,12 +1,13 @@
-# Лёгкий python-base — модель крутится на удалённом Triton, локальный CUDA не нужен.
+# Inference-service: gRPC-клиент удалённого Triton Inference Server.
+# Сама модель eosinophil_seg крутится на Triton'e (например на 188.126.62.18:18001),
+# мы здесь делаем препроцессинг, NMS и формирование ответа.
 FROM python:3.11-slim
 
 WORKDIR /app
 
-# Системные зависимости для opencv-python-headless
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-       libglib2.0-0 libsm6 libxext6 libxrender1 \
+       libglib2.0-0 libsm6 libxext6 libxrender1 libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .

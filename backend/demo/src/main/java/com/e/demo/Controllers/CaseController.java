@@ -54,9 +54,10 @@ public class CaseController {
         return (Integer) auth.getPrincipal();
     }
 
-    /** Список активных кейсов текущего пользователя. Кэш 10 сек. */
+    /** Список активных кейсов текущего пользователя.
+     *  Кеш отключён по той же причине что в FileController.getSlides — при cache.type=simple
+     *  TTL не работает, и статусы кейсов залипают. */
     @GetMapping
-    @Cacheable(value = CacheConfig.CACHE_CASES_BY_USER, key = "#root.target.currentUserId()")
     public List<Map<String, Object>> list() {
         Integer uid = currentUserId();
         return caseRepo.findActiveByUser(uid).stream().map(this::toView).toList();

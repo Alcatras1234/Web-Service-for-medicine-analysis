@@ -46,7 +46,27 @@ export default function CasesPage() {
   }
 
   return (
-    <div className="min-h-screen bg-slate-50 p-6">
+    <div className="min-h-screen bg-slate-50">
+      {/* Шапка с навигацией */}
+      <header className="bg-white border-b border-slate-200 sticky top-0 z-30">
+        <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 h-14 flex items-center gap-2">
+          <Link href="/dashboard" className="text-slate-600 hover:text-slate-900 px-2 py-1 rounded hover:bg-slate-100 text-sm">
+            ← Дашборд
+          </Link>
+          <span className="text-slate-300">/</span>
+          <span className="text-slate-900 font-medium text-sm">Кейсы</span>
+          <div className="ml-auto flex items-center gap-1">
+            <Link href="/patients" className="text-slate-600 hover:text-slate-900 px-3 py-1 rounded hover:bg-slate-100 text-sm">
+              Пациенты
+            </Link>
+            <Link href="/dashboard" className="text-slate-600 hover:text-slate-900 px-3 py-1 rounded hover:bg-slate-100 text-sm">
+              Слайды
+            </Link>
+          </div>
+        </div>
+      </header>
+
+      <div className="max-w-6xl mx-auto p-6">
       <h1 className="text-2xl font-bold mb-4">Клинические кейсы</h1>
 
       <form onSubmit={createCase} className="bg-white p-4 rounded shadow mb-6 flex gap-2">
@@ -96,6 +116,7 @@ export default function CasesPage() {
           </table>
         </div>
       )}
+      </div>
     </div>
   )
 }

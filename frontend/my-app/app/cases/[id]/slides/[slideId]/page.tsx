@@ -34,8 +34,6 @@ export default function SlideViewerPage() {
   const [detections, setDetections] = useState<Detections | null>(null)
   const [showOverlay, setShowOverlay] = useState(false)
   const [overlayLoading, setOverlayLoading] = useState(false)
-  const [showHeatmap, setShowHeatmap] = useState(false)
-  const heatmapElemRef = useRef<HTMLImageElement | null>(null)
   const hpfGaugeRef = useRef<HTMLDivElement | null>(null)
   const [showHpfGauge, setShowHpfGauge] = useState(false)
 
@@ -64,6 +62,12 @@ export default function SlideViewerPage() {
         element: containerRef.current,
         prefixUrl: "https://cdnjs.cloudflare.com/ajax/libs/openseadragon/4.1.0/images/",
         showNavigator: true,
+        navigatorPosition: "TOP_RIGHT",
+        navigatorWidth: 220,
+        navigatorHeight: 220,
+        navigatorBackground: "#000",
+        navigatorBorderColor: "#444",
+        navigatorDisplayRegionColor: "#00cc44",
         tileSources: {
           height: i.height,
           width: i.width,
@@ -74,6 +78,7 @@ export default function SlideViewerPage() {
             `/api/iiif/${slideId}/tile/${level}/${x}_${y}.jpg`,
         },
       })
+
 
       // §5.3: масштабная линейка
       const detachScale = attachScaleBar(viewerRef.current, i.mppX, containerRef.current)
@@ -214,33 +219,6 @@ export default function SlideViewerPage() {
     setShowHpfGauge(true)
   }
 
-  function toggleHeatmap() {
-    const v = viewerRef.current
-    if (!v || !info || !detections?.jobId) return
-
-    if (showHeatmap && heatmapElemRef.current) {
-      v.removeOverlay(heatmapElemRef.current)
-      heatmapElemRef.current = null
-      setShowHeatmap(false)
-      return
-    }
-
-    // Накладываем heatmap.png в координатах всего WSI с полупрозрачностью
-    const img = document.createElement("img")
-    img.src = `/api/reports/${detections.jobId}/heatmap`
-    img.style.opacity = "0.55"
-    img.style.mixBlendMode = "multiply"
-    img.style.pointerEvents = "none"
-    img.style.width = "100%"
-    img.style.height = "100%"
-    heatmapElemRef.current = img
-    v.addOverlay({
-      element: img,
-      location: v.viewport.imageToViewportRectangle(0, 0, info.width, info.height),
-    })
-    setShowHeatmap(true)
-  }
-
   function zoomToHpf() {
     if (!viewerRef.current || !detections || !info?.mppX) return
     const win = Math.round(Math.sqrt(0.3) * 1000 / info.mppX)
@@ -308,8 +286,20 @@ export default function SlideViewerPage() {
 
   return (
     <div className="min-h-screen bg-slate-900 text-white">
-      <div className="p-3 bg-slate-800 flex items-center gap-4">
-        <Link href={`/cases/${params.id}`} className="text-blue-300 text-sm">← К кейсу</Link>
+      <div className="p-3 bg-slate-800 flex items-center gap-2 flex-wrap">
+        <Link href="/dashboard" className="text-slate-300 hover:text-white px-2 py-1 rounded hover:bg-slate-700 text-sm">
+          ← Дашборд
+        </Link>
+        <span className="text-slate-500">/</span>
+        <Link href="/cases" className="text-slate-300 hover:text-white px-2 py-1 rounded hover:bg-slate-700 text-sm">
+          Кейсы
+        </Link>
+        <span className="text-slate-500">/</span>
+        <Link href={`/cases/${params.id}`} className="text-slate-300 hover:text-white px-2 py-1 rounded hover:bg-slate-700 text-sm">
+          Кейс #{params.id}
+        </Link>
+        <span className="text-slate-500">/</span>
+        <span className="text-white text-sm font-medium">Слайд #{slideId}</span>
         <div className="text-sm">
           {info ? `${info.width}×${info.height} px` : ""}
           {info?.mppX ? ` • MPP=${info.mppX.toFixed(3)} µm/px` : ""}
@@ -331,10 +321,6 @@ export default function SlideViewerPage() {
             <button onClick={toggleHpfGauge}
                     className="px-3 py-1 bg-green-700 rounded text-sm">
               {showHpfGauge ? "Скрыть 0.3 мм²" : "Показать 0.3 мм²"}
-            </button>
-            <button onClick={toggleHeatmap}
-                    className="px-3 py-1 bg-purple-700 rounded text-sm">
-              {showHeatmap ? "Скрыть heatmap" : "Heatmap"}
             </button>
             <button onClick={toggleOverlay} disabled={overlayLoading}
                     className="px-3 py-1 bg-slate-700 rounded text-sm">

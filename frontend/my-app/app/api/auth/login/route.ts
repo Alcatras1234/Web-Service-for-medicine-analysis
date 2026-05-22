@@ -4,7 +4,9 @@ export async function POST(request: NextRequest) {
   try {
     const body = await request.json()
 
-    const backendResponse = await fetch('http://localhost:8080/api/auth/login', {
+    // 127.0.0.1, а не "localhost" — Node 18+ резолвит localhost в IPv6 (::1) первым,
+    // а docker port mapping слушает только IPv4 (0.0.0.0). Получаем ECONNREFUSED → 503.
+    const backendResponse = await fetch('http://127.0.0.1:8080/api/auth/login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),

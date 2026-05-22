@@ -180,10 +180,11 @@ public class FileController {
         return ResponseEntity.noContent().build();
     }
 
-    // Список слайдов текущего пользователя с актуальным статусом и jobId. Кэшируется 5 сек.
-    // Возвращаем чистый List (а не ResponseEntity) — иначе RedisCache не сможет десериализовать.
+    // Список слайдов текущего пользователя со статусом и jobId.
+    // Кеш отключён: при spring.cache.type=simple TTL не работает, и кеш живёт вечно —
+    // фронт получает залипшие PROCESSING статусы даже когда job уже DONE. Если когда-то
+    // переедем на redis/caffeine с TTL — можно вернуть @Cacheable.
     @GetMapping("/slides")
-    @Cacheable(value = CacheConfig.CACHE_SLIDES_BY_USER, key = "#root.target.currentUserId()")
     public List<Map<String, Object>> getSlides() {
         Integer userId = currentUserId();
 

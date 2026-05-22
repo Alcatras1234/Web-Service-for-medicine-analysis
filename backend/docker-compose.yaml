@@ -1,10 +1,7 @@
 # Все контейнеры этого проекта именованы с префиксом eosinai-* и помещены
 # в одну сеть eosinai-net. Project name задаётся через COMPOSE_PROJECT_NAME=eosinai
-# (см. .env рядом) — это значит:
-#   docker compose up -d        ← поднимает только наши контейнеры
-#   docker compose down         ← гасит только наши, чужие на сервере не трогает
-#   docker compose ps           ← показывает только наши
-# Не используй "docker stop $(docker ps -q)" — снесёт ВСЕ контейнеры на сервере.
+# (см. .env рядом). На прод-сервере все хост-порты со сдвигом +10000,
+# чтобы не конфликтовать с уже занятыми портами.
 
 networks:
   eosinai-net:
@@ -13,17 +10,15 @@ networks:
 
 volumes:
   eosinai-postgres-data:
-  # eosinai-pgadmin-data:    # pgAdmin отключён
   eosinai-minio-data:
   eosinai-wsi-cache:
-  # eosinai-triton-models:   # модели лежат внутри Triton-образа, volume не нужен
 
 services:
 
   eosinai-postgres:
     image: postgres:15
     container_name: eosinai-postgres
-    hostname: backend_db          # ← старое имя оставлено, иначе придётся править application.yaml
+    hostname: backend_db
     environment:
       POSTGRES_DB: "back_DB"
       POSTGRES_USER: "amogus"
@@ -32,8 +27,6 @@ services:
     volumes:
       - eosinai-postgres-data:/var/lib/postgresql/data/pgdata
     ports:
-      # Хост-порт смещён на +10000 чтобы не конфликтовать с системным postgres'ом на сервере.
-      # Внутри docker-сети backend всё равно ходит на 5432 (см. application.yaml).
       - "15432:5432"
     networks:
       - eosinai-net
@@ -50,33 +43,14 @@ services:
           cpus: '1'
           memory: 4G
 
-  # pgAdmin отключён — не нужен в проде. При необходимости расскомментировать.
-  # eosinai-pgadmin:
-  #   image: dpage/pgadmin4
-  #   container_name: eosinai-pgadmin
-  #   environment:
-  #     PGADMIN_DEFAULT_EMAIL: admin@admin.com
-  #     PGADMIN_DEFAULT_PASSWORD: admin
-  #   ports:
-  #     - "15050:80"
-  #   depends_on:
-  #     - eosinai-postgres
-  #   volumes:
-  #     - eosinai-pgadmin-data:/var/lib/pgadmin
-  #   networks:
-  #     - eosinai-net
-  #   restart: unless-stopped
-
   eosinai-minio:
     image: minio/minio
     container_name: eosinai-minio
-    hostname: minio              # ← алиас, чтобы application.yaml не править
+    hostname: minio
     command: server /data --console-address ":9001"
     ports:
-      # Левая часть — порт на хосте, правая — внутри контейнера.
-      # Меняем хост-порт чтобы не было конфликта с другим minio/nginx на сервере.
-      - "19000:9000"
-      - "19001:9001"
+      - "19000:9000"    # S3 API
+      - "19001:9001"    # Web UI
     networks:
       - eosinai-net
     environment:
@@ -89,10 +63,10 @@ services:
   eosinai-rabbitmq:
     image: rabbitmq:3-management
     container_name: eosinai-rabbitmq
-    hostname: rabbitmq           # ← алиас
+    hostname: rabbitmq
     ports:
-      - "15672:5672"     # AMQP
-      - "25672:15672"    # Management UI
+      - "15672:5672"    # AMQP
+      - "25672:15672"   # Management UI (http://188.126.62.18:25672, guest/guest)
     networks:
       - eosinai-net
     restart: unless-stopped
@@ -100,7 +74,7 @@ services:
   eosinai-redis:
     image: redis:7-alpine
     container_name: eosinai-redis
-    hostname: redis              # ← алиас
+    hostname: redis
     ports:
       - "16379:6379"
     command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru --save ""
@@ -132,45 +106,9 @@ services:
     networks:
       - eosinai-net
 
-  # Triton Inference Server — модель крутится прямо в нашем стеке
-  # Dockerfile лежит в /home/dbz/triton_eosinophil/ на сервере
-  eosinai-triton:
-    build:
-      context: /home/dbz/triton_eosinophil
-      dockerfile: Dockerfile
-    container_name: eosinai-triton
-    hostname: triton
-    # Порты НЕ публикуем наружу — Triton доступен только из docker-сети eosinai-net
-    # через имена triton:8000 (HTTP) и triton:8001 (gRPC).
-    networks:
-      - eosinai-net
-    # Модели лежат на хосте отдельной папкой (read-only монтирование).
-    # Внутри ожидаются папки eosinophil_pipeline (ensemble), eosinophil_preprocess,
-    # eosinophil_seg, eosinophil_postprocess.
-    volumes:
-      - /home/dbz/triton_eosinophil/models:/models:ro
-    # Базовый образ tritonserver:24.09-py3 имеет дефолтный ENTRYPOINT=tritonserver,
-    # но без явного --model-repository выходит сразу. Указываем явно.
-    command: >
-      tritonserver
-      --model-repository=/models
-      --strict-model-config=false
-      --log-verbose=1
-    restart: unless-stopped
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
-    healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://localhost:8000/v2/health/ready"]
-      interval: 15s
-      timeout: 5s
-      retries: 8
-      start_period: 60s
-
+  # Inference-сервис: gRPC-клиент удалённого Triton.
+  # Локального Triton-контейнера в стеке больше нет — он крутится отдельно на хосте
+  # (188.126.62.18:18001) под другим compose-проектом.
   eosinai-inference:
     build:
       context: ./inference-service
@@ -178,22 +116,19 @@ services:
     container_name: eosinai-inference
     hostname: inference
     ports:
-      - "8500:8500"
+      - "18500:8500"
     networks:
       - eosinai-net
-    depends_on:
-      - eosinai-triton
-    # Препроцессинг + NMS/маски/CC + прокси на Triton через gRPC.
-    # Triton теперь в той же сети — обращаемся по имени, не по IP.
     environment:
-      - TRITON_URL=triton:8001
-      - TRITON_MODEL_NAME=eosinophil_pipeline
+      - TRITON_URL=188.126.62.18:18001
+      - TRITON_MODEL_NAME=eosinophil_seg
+      - TRITON_INPUT_NAME=images
       - TRITON_TIMEOUT_S=60
       - CONF_THRESH=0.25
       - IOU_THRESH=0.45
       - INPUT_SIZE=448
       - NUM_CLASSES=2
-      - COORD_SCALE_FACTOR=1.0
+      - USE_CC_COUNT=false
     restart: unless-stopped
 
   eosinai-server:
@@ -202,10 +137,8 @@ services:
       dockerfile: Dockerfile
     container_name: eosinai-server
     hostname: server
-    # Наружу НЕ публикуем — фронт ходит к нам по docker-сети по имени server:8080.
-    # Если нужен прямой доступ к API для отладки — добавь ports: ["18080:8080"].
-    expose:
-      - "8080"
+    ports:
+      - "18080:8080"
     depends_on:
       - eosinai-postgres
       - eosinai-rabbitmq
@@ -217,24 +150,21 @@ services:
     volumes:
       - eosinai-wsi-cache:/tmp/wsi-cache
     environment:
-      # MINIO_PUBLIC_URL больше не используется браузером для аплоада
-      # (мы проксируем через /api/files/proxy-upload). Оставлен на случай если где-то
-      # ещё понадобятся пресайны — указывает на внутренний docker-адрес.
-      - MINIO_PUBLIC_URL=http://minio:9000
+      # Браузер фронта (на удалённом сервере) бьёт по публичному IP с портом MinIO,
+      # если когда-то понадобятся пресайны. Сейчас не используется — фронт идёт
+      # через Spring (/api/files/proxy-upload).
+      - MINIO_PUBLIC_URL=http://188.126.62.18:19000
     restart: unless-stopped
 
-  # Next.js фронт. Снаружи доступен через ngrok-туннель (см. eosinai-ngrok ниже).
-  # Если когда-нибудь админ откроет порт наружу — раскомментируй ports.
+  # Next.js фронт. Внешний доступ: http://188.126.62.18:13000
   eosinai-frontend:
     build:
       context: ../frontend/my-app
       dockerfile: Dockerfile
     container_name: eosinai-frontend
     hostname: frontend
-    expose:
-      - "3000"
-    # ports:
-    #   - "3000:27"
+    ports:
+      - "27:27"
     depends_on:
       - eosinai-server
     networks:
@@ -244,30 +174,3 @@ services:
       # Внутри docker-сети Spring доступен по имени контейнера server.
       - BACKEND_URL=http://server:8080
     restart: unless-stopped
-
-  # Cloudflare Tunnel — публичный URL без регистрации. Использует исходящий 443
-  # на инфру Cloudflare (которую блокируют редко — это огромный CDN).
-  # URL виден в логах: docker compose logs eosinai-cloudflared | grep trycloudflare
-  eosinai-cloudflared:
-    image: cloudflare/cloudflared:latest
-    container_name: eosinai-cloudflared
-    hostname: cloudflared
-    command: tunnel --no-autoupdate --url http://frontend:3000
-    depends_on:
-      - eosinai-frontend
-    networks:
-      - eosinai-net
-    restart: unless-stopped
-
-  # ngrok оставлен закомментированным — на этом сервере исходящий до ngrok заблокирован.
-  # eosinai-ngrok:
-  #   image: ngrok/ngrok:latest
-  #   container_name: eosinai-ngrok
-  #   command: ["http", "frontend:3000", "--log=stdout"]
-  #   environment:
-  #     - NGROK_AUTHTOKEN=${NGROK_AUTHTOKEN}
-  #   depends_on:
-  #     - eosinai-frontend
-  #   networks:
-  #     - eosinai-net
-  #   restart: unless-stopped
