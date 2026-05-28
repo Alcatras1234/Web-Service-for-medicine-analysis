@@ -9,9 +9,10 @@ networks:
     name: eosinai-net
     ipam:
       config:
-        # Фикс-IP'ы нужны nginx'у (который в network_mode: host) чтобы знать куда
-        # форвардить запросы — host-сеть не видит docker DNS, только IP.
-        - subnet: 172.28.0.0/16
+        # Subnet совпадает с уже существующей сетью на сервере (192.168.48.0/20),
+        # чтобы docker переиспользовал её без пересоздания.
+        # Фикс-IP'ы нужны nginx'у (network_mode: host) — host-сеть не видит docker DNS.
+        - subnet: 192.168.48.0/20
 
 volumes:
   eosinai-postgres-data:
@@ -175,7 +176,7 @@ services:
       - eosinai-server
     networks:
       eosinai-net:
-        ipv4_address: 172.28.0.10
+        ipv4_address: 192.168.48.10
     environment:
       - NODE_ENV=production
       # Внутри docker-сети Spring доступен по имени контейнера server.
