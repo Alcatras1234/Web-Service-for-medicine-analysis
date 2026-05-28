@@ -7,6 +7,11 @@ networks:
   eosinai-net:
     driver: bridge
     name: eosinai-net
+    ipam:
+      config:
+        # Фикс-IP'ы нужны nginx'у (который в network_mode: host) чтобы знать куда
+        # форвардить запросы — host-сеть не видит docker DNS, только IP.
+        - subnet: 172.28.0.0/16
 
 volumes:
   eosinai-postgres-data:
@@ -156,22 +161,37 @@ services:
       - MINIO_PUBLIC_URL=http://188.126.62.18:19000
     restart: unless-stopped
 
-  # Next.js фронт. Внешний доступ: http://188.126.62.18:27
-  # Внутри контейнера Next.js слушает 27 (привилегированный порт, в alpine root).
+  # Next.js фронт. Снаружи ходит через nginx (см. eosinai-nginx) — порт сам не публикуем,
+  # нагло сидим в docker-сети с фикс-IP, чтобы nginx нас всегда находил.
   eosinai-frontend:
     build:
       context: ../frontend/my-app
       dockerfile: Dockerfile
     container_name: eosinai-frontend
     hostname: frontend
-    ports:
-      - "27:27"
+    expose:
+      - "27"
     depends_on:
       - eosinai-server
     networks:
-      - eosinai-net
+      eosinai-net:
+        ipv4_address: 172.28.0.10
     environment:
       - NODE_ENV=production
       # Внутри docker-сети Spring доступен по имени контейнера server.
       - BACKEND_URL=http://server:8080
+    restart: unless-stopped
+
+  # Nginx reverse-proxy.
+  # network_mode: host — биндит host:27 напрямую через TCP-стек хоста, минуя
+  # сломанный на этом сервере docker-proxy. Подключения к контейнерам через
+  # docker bridge по фикс-IP (172.28.0.0/16).
+  eosinai-nginx:
+    image: nginx:alpine
+    container_name: eosinai-nginx
+    network_mode: host
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - eosinai-frontend
     restart: unless-stopped
