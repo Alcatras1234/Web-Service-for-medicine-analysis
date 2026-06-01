@@ -120,9 +120,10 @@ services:
     networks:
       - eosinai-net
 
-  # Inference-сервис: gRPC-клиент удалённого Triton.
-  # Локального Triton-контейнера в стеке больше нет — он крутится отдельно на хосте
-  # (188.126.62.18:18001) под другим compose-проектом.
+  # Inference-сервис: gRPC-клиент к Triton.
+  # Triton крутится на хосте в network_mode: host (под /home/dbz/triton_eosinophil/),
+  # слушает host:18001 (gRPC) и host:18000 (HTTP). Через host-gateway ходим напрямую
+  # к хосту — это в разы быстрее чем через внешний IP 188.126.62.18 (петля наружу).
   eosinai-inference:
     build:
       context: ./inference-service
@@ -133,8 +134,10 @@ services:
       - "18500:8500"
     networks:
       - eosinai-net
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
-      - TRITON_URL=188.126.62.18:18001
+      - TRITON_URL=host.docker.internal:18001
       - TRITON_MODEL_NAME=eosinophil_seg
       - TRITON_INPUT_NAME=images
       - TRITON_TIMEOUT_S=60
