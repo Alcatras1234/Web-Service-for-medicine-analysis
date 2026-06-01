@@ -76,6 +76,12 @@ services:
       - "25672:15672"   # Management UI (http://188.126.62.18:25672, guest/guest)
     networks:
       - eosinai-net
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
     restart: unless-stopped
 
   eosinai-redis:
@@ -98,7 +104,8 @@ services:
     image: liquibase/liquibase:4.29
     container_name: eosinai-liquibase
     depends_on:
-      - eosinai-postgres
+      eosinai-postgres:
+        condition: service_healthy   # ждём пока postgres реально готов принимать подключения
     command:
       - --searchPath=/changesets
       - --changelog-file=master.yaml
@@ -147,11 +154,18 @@ services:
     ports:
       - "18080:8080"
     depends_on:
-      - eosinai-postgres
-      - eosinai-rabbitmq
-      - eosinai-minio
-      - eosinai-redis
-      - eosinai-inference
+      eosinai-postgres:
+        condition: service_healthy            # БД готова
+      eosinai-liquibase:
+        condition: service_completed_successfully   # миграции накатились (exit 0)
+      eosinai-rabbitmq:
+        condition: service_healthy            # rabbit готов
+      eosinai-redis:
+        condition: service_healthy            # redis готов
+      eosinai-minio:
+        condition: service_started            # minio без healthcheck — просто ждём старт
+      eosinai-inference:
+        condition: service_started            # inference готов принимать запросы
     networks:
       - eosinai-net
     volumes:
@@ -187,7 +201,7 @@ services:
   # Nginx reverse-proxy.
   # network_mode: host — биндит host:27 напрямую через TCP-стек хоста, минуя
   # сломанный на этом сервере docker-proxy. Подключения к контейнерам через
-  # docker bridge по фикс-IP (172.28.0.0/16).
+  # docker bridge по фикс-IP (10.27.0.0/16).
   eosinai-nginx:
     image: nginx:alpine
     container_name: eosinai-nginx
@@ -195,5 +209,6 @@ services:
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
     depends_on:
-      - eosinai-frontend
+      eosinai-frontend:
+        condition: service_started
     restart: unless-stopped
